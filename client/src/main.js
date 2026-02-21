@@ -90,6 +90,21 @@ function getClockIcon(minutes, dayNumber = 1) {
   return dayNumber % 2 === 0 ? "🌜" : "🌙";
 }
 
+function hashText(value) {
+  let hash = 0;
+  const text = String(value || "");
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash << 5) - hash + text.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function getNpcTint(id) {
+  const palette = [0x89a7ff, 0xf8aa74, 0xa8df7c, 0xe8a6ff, 0x7cd7d5, 0xf6d274];
+  return palette[hashText(id) % palette.length];
+}
+
 function normalizeGender(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "male" || normalized === "female" || normalized === "non-binary") {
@@ -232,8 +247,9 @@ class TownScene extends Phaser.Scene {
     this.createLightingLayer();
     this.applyDayNightVisuals({ timeMinutes: 8 * 60 });
 
-    this.player = this.add.rectangle(680, 220, 20, 20, 0xf6e27f);
-    this.physics.add.existing(this.player);
+    this.player = this.physics.add.image(680, 220, "spr_player");
+    this.player.setDepth(24);
+    this.player.body.setSize(14, 16);
     this.player.body.setCollideWorldBounds(true);
 
     this.playerLabel = this.add.text(this.player.x - 10, this.player.y - 26, this.playerProfile.name, {
@@ -272,40 +288,128 @@ class TownScene extends Phaser.Scene {
       g.destroy();
     };
 
-    makeTile("tile_grass", 0x3f6d43, [
+    makeTile("tile_grass_a", 0x3f6d43, [
       { x: 2, y: 3, w: 2, h: 2, color: 0x4f7f52 },
       { x: 24, y: 8, w: 2, h: 2, color: 0x355d39 },
-      { x: 12, y: 20, w: 2, h: 2, color: 0x4f7f52 }
+      { x: 12, y: 20, w: 2, h: 2, color: 0x4f7f52 },
+      { x: 9, y: 13, w: 1, h: 1, color: 0x7bb06a },
+      { x: 26, y: 18, w: 1, h: 1, color: 0x7bb06a }
     ]);
-    makeTile("tile_path", 0x8a784f, [
+    makeTile("tile_grass_b", 0x436f46, [
+      { x: 4, y: 4, w: 2, h: 2, color: 0x518153 },
+      { x: 18, y: 14, w: 2, h: 2, color: 0x345b38 },
+      { x: 9, y: 23, w: 2, h: 2, color: 0x567f57 },
+      { x: 25, y: 25, w: 1, h: 1, color: 0x81b06d }
+    ]);
+    makeTile("tile_grass_c", 0x3b673f, [
+      { x: 2, y: 12, w: 2, h: 2, color: 0x4f7e53 },
+      { x: 16, y: 5, w: 3, h: 2, color: 0x315537 },
+      { x: 27, y: 16, w: 2, h: 2, color: 0x4a7a4f },
+      { x: 11, y: 27, w: 1, h: 1, color: 0x77aa66 }
+    ]);
+    makeTile("tile_path_a", 0x8a784f, [
       { x: 4, y: 6, w: 2, h: 2, color: 0x756742 },
       { x: 19, y: 17, w: 2, h: 2, color: 0x9d8b5f },
-      { x: 10, y: 26, w: 2, h: 2, color: 0x756742 }
+      { x: 10, y: 26, w: 2, h: 2, color: 0x756742 },
+      { x: 27, y: 2, w: 1, h: 1, color: 0x6a5b3c }
     ]);
-    makeTile("tile_water", 0x3a6e88, [
+    makeTile("tile_path_b", 0x85734c, [
+      { x: 3, y: 5, w: 2, h: 2, color: 0x72653f },
+      { x: 18, y: 16, w: 2, h: 2, color: 0x9d8d66 },
+      { x: 12, y: 23, w: 2, h: 2, color: 0x715f3b },
+      { x: 24, y: 9, w: 1, h: 1, color: 0xa9986c }
+    ]);
+    makeTile("tile_water", 0x366988, [
       { x: 5, y: 4, w: 3, h: 1, color: 0x4d8ca8 },
       { x: 17, y: 12, w: 3, h: 1, color: 0x4d8ca8 },
-      { x: 9, y: 24, w: 4, h: 1, color: 0x4d8ca8 }
+      { x: 9, y: 24, w: 4, h: 1, color: 0x4d8ca8 },
+      { x: 24, y: 20, w: 2, h: 1, color: 0x59a0ba }
     ]);
 
     const block = this.make.graphics({ x: 0, y: 0, add: false });
-    block.fillStyle(0xb8a37a, 1);
-    block.fillRect(0, 0, TILE * 2, TILE * 2);
-    block.fillStyle(0x7e4f3e, 1);
-    block.fillRect(0, 0, TILE * 2, 8);
-    block.fillRect(0, 10, TILE * 2, 2);
-    block.fillStyle(0x2b2b2b, 1);
-    block.fillRect(10, TILE + 5, 12, 18);
+    block.fillStyle(0x6c4536, 1);
+    block.fillRect(0, 0, TILE * 2, 12);
+    block.fillStyle(0x8f5d49, 1);
+    block.fillRect(2, 12, TILE * 2 - 4, 6);
+    block.fillStyle(0xc4af86, 1);
+    block.fillRect(0, 18, TILE * 2, TILE * 2 - 18);
+    block.fillStyle(0xa18966, 1);
+    block.fillRect(0, 46, TILE * 2, 4);
+    block.fillStyle(0x2a2a2a, 1);
+    block.fillRect(26, 34, 12, 20);
+    block.fillStyle(0xe4cb86, 1);
+    block.fillRect(8, 30, 12, 10);
+    block.fillRect(44, 30, 12, 10);
     block.generateTexture("tile_house", TILE * 2, TILE * 2);
     block.destroy();
+
+    const tree = this.make.graphics({ x: 0, y: 0, add: false });
+    tree.fillStyle(0x3a2e1f, 1);
+    tree.fillRect(13, 18, 6, 12);
+    tree.fillStyle(0x305f3b, 1);
+    tree.fillCircle(16, 13, 10);
+    tree.fillStyle(0x3f7a4a, 1);
+    tree.fillCircle(12, 10, 7);
+    tree.fillCircle(20, 11, 6);
+    tree.generateTexture("tile_tree", TILE, TILE);
+    tree.destroy();
+
+    const shrub = this.make.graphics({ x: 0, y: 0, add: false });
+    shrub.fillStyle(0x2f613b, 1);
+    shrub.fillCircle(10, 18, 7);
+    shrub.fillCircle(18, 18, 7);
+    shrub.fillStyle(0x3f7b4a, 1);
+    shrub.fillCircle(14, 14, 7);
+    shrub.generateTexture("tile_shrub", TILE, TILE);
+    shrub.destroy();
+
+    const lamp = this.make.graphics({ x: 0, y: 0, add: false });
+    lamp.fillStyle(0x493e2c, 1);
+    lamp.fillRect(14, 12, 4, 18);
+    lamp.fillStyle(0xe7c979, 1);
+    lamp.fillRect(11, 8, 10, 6);
+    lamp.generateTexture("tile_lamp", TILE, TILE);
+    lamp.destroy();
+
+    const player = this.make.graphics({ x: 0, y: 0, add: false });
+    player.fillStyle(0x121212, 0.22);
+    player.fillEllipse(8, 17, 12, 4);
+    player.fillStyle(0xe8d28a, 1);
+    player.fillRect(4, 3, 8, 7);
+    player.fillStyle(0x6a4e35, 1);
+    player.fillRect(3, 2, 10, 3);
+    player.fillStyle(0x4f7294, 1);
+    player.fillRect(3, 10, 10, 6);
+    player.fillStyle(0x2a2a2a, 1);
+    player.fillRect(3, 16, 4, 2);
+    player.fillRect(9, 16, 4, 2);
+    player.generateTexture("spr_player", 16, 18);
+    player.destroy();
+
+    const npc = this.make.graphics({ x: 0, y: 0, add: false });
+    npc.fillStyle(0x111111, 0.2);
+    npc.fillEllipse(8, 17, 12, 4);
+    npc.fillStyle(0xffffff, 1);
+    npc.fillRect(4, 3, 8, 7);
+    npc.fillStyle(0x3d2d20, 1);
+    npc.fillRect(3, 2, 10, 3);
+    npc.fillStyle(0x5e6f93, 1);
+    npc.fillRect(3, 10, 10, 6);
+    npc.fillStyle(0x2a2a2a, 1);
+    npc.fillRect(3, 16, 4, 2);
+    npc.fillRect(9, 16, 4, 2);
+    npc.generateTexture("spr_npc", 16, 18);
+    npc.destroy();
   }
 
   drawMap() {
     const cols = WORLD_WIDTH / TILE;
     const rows = WORLD_HEIGHT / TILE;
+    const grassKeys = ["tile_grass_a", "tile_grass_b", "tile_grass_c"];
     for (let y = 0; y < rows; y += 1) {
       for (let x = 0; x < cols; x += 1) {
-        this.add.image(x * TILE + TILE / 2, y * TILE + TILE / 2, "tile_grass").setOrigin(0.5);
+        const grassKey = grassKeys[(x * 17 + y * 31) % grassKeys.length];
+        this.add.image(x * TILE + TILE / 2, y * TILE + TILE / 2, grassKey).setOrigin(0.5);
       }
     }
 
@@ -324,7 +428,8 @@ class TownScene extends Phaser.Scene {
       const ey = Math.floor((y + h) / TILE);
       for (let iy = sy; iy <= ey; iy += 1) {
         for (let ix = sx; ix <= ex; ix += 1) {
-          this.add.image(ix * TILE + TILE / 2, iy * TILE + TILE / 2, "tile_path").setOrigin(0.5);
+          const pathKey = (ix + iy) % 2 === 0 ? "tile_path_a" : "tile_path_b";
+          this.add.image(ix * TILE + TILE / 2, iy * TILE + TILE / 2, pathKey).setOrigin(0.5);
         }
       }
     };
@@ -343,10 +448,38 @@ class TownScene extends Phaser.Scene {
       { x: 900, y: 540 }
     ];
     for (const b of buildings) {
+      this.add.image(b.x + 2, b.y + 2, "tile_house").setOrigin(0.5).setTint(0x000000).setAlpha(0.18);
       this.add.image(b.x, b.y, "tile_house").setOrigin(0.5);
     }
 
-    const homeField = this.add.rectangle(642, 292, 160, 150, 0x5e4a2f, 0.35);
+    const treePoints = [
+      [160, 810],
+      [210, 860],
+      [280, 940],
+      [350, 1030],
+      [450, 940],
+      [500, 860],
+      [1120, 1000],
+      [1180, 960],
+      [1240, 910]
+    ];
+    treePoints.forEach(([x, y], i) => {
+      const tex = i % 3 === 0 ? "tile_shrub" : "tile_tree";
+      this.add.image(x, y, tex).setDepth(6);
+    });
+
+    const lampPoints = [
+      [600, 500],
+      [720, 500],
+      [840, 500],
+      [300, 260],
+      [300, 420]
+    ];
+    lampPoints.forEach(([x, y]) => {
+      this.add.image(x, y, "tile_lamp").setDepth(7);
+    });
+
+    const homeField = this.add.rectangle(642, 292, 160, 150, 0x6b5432, 0.36);
     homeField.setStrokeStyle(1, 0xb2925a, 0.6);
     this.add.text(565, 222, "Your Home Field", {
       fontSize: "11px",
@@ -537,8 +670,8 @@ class TownScene extends Phaser.Scene {
       activeIds.add(npc.id);
       let sprite = this.npcSprites.get(npc.id);
       if (!sprite) {
-        const color = Phaser.Display.Color.RandomRGB(80, 220).color;
-        const body = this.add.rectangle(npc.x, npc.y, 18, 18, color);
+        const tint = getNpcTint(npc.id);
+        const body = this.add.image(npc.x, npc.y, "spr_npc").setTint(tint).setDepth(24);
         body.setInteractive({ useHandCursor: true });
         body.on("pointerdown", () => {
           if (
@@ -555,13 +688,14 @@ class TownScene extends Phaser.Scene {
           stroke: "#000",
           strokeThickness: 2
         });
-        sprite = { body, label, name: npc.name };
+        sprite = { body, label, tint, name: npc.name };
         this.npcSprites.set(npc.id, sprite);
       }
       sprite.body.x = npc.x;
       sprite.body.y = npc.y;
       const isActiveDialogueNpc = this.activeDialogueNpcId === npc.id;
-      sprite.body.setStrokeStyle(isActiveDialogueNpc ? 2 : 0, 0xf8e58a, 1);
+      sprite.body.setTint(isActiveDialogueNpc ? 0xffe29a : sprite.tint);
+      sprite.body.setScale(isActiveDialogueNpc ? 1.08 : 1);
       sprite.label.x = npc.x - 16;
       sprite.label.y = npc.y - 24;
     }
