@@ -509,6 +509,11 @@ class TownScene extends Phaser.Scene {
       : `Mission ${world.mission?.step || 1}/${world.mission?.total || 1}: ${world.mission?.title || "Explore town"}`;
     const missionProgress = world.mission?.progress ? ` (${world.mission.progress})` : "";
     document.getElementById("mission").textContent = `${missionLabel}${missionProgress}`;
+    const townMission = world.townMission;
+    const townMissionText = townMission
+      ? `Town Gossip Mission: ${townMission.title} (${townMission.progress})`
+      : "Town Gossip Mission: waiting...";
+    document.getElementById("town-mission").textContent = townMissionText;
     this.applyDayNightVisuals(world);
 
     if (world.you?.name) {

@@ -51,6 +51,16 @@ function shortenLine(text, maxWords = 14) {
   return `${words.slice(0, maxWords).join(" ")}...`;
 }
 
+function sanitizeMissionObjectiveType(value) {
+  const v = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (v === "visit_area" || v === "talk_to_any_npc" || v === "talk_to_role" || v === "harvest_any") {
+    return v;
+  }
+  return "talk_to_any_npc";
+}
+
 function fallbackLine(speaker, target, worldContext) {
   const roleLineByRole = {
     Businessman: "I smile at customers, then panic over rent and cart fees.",
@@ -128,6 +138,64 @@ When replying to a player's message, usually respond to their topic/tone directl
         emotion: "neutral",
         memoryWrite: `${speaker.name} chatted with ${target.name}.`
       };
+    }
+  }
+
+  async generateTownMission({ worldContext, townLog, areaNames, roleNames }) {
+    const fallback = {
+      title: "Town Chatter",
+      description: "Hear what people are saying around town.",
+      objectiveType: "talk_to_any_npc",
+      targetCount: 2,
+      gossip: worldContext?.rumorOfTheDay || "People are talking all over town."
+    };
+
+    if (!this.client) {
+      return fallback;
+    }
+
+    const prompt = [
+      `Time: ${worldContext?.timeLabel || "morning"}, Day: ${worldContext?.dayNumber || 1}, Weather: ${worldContext?.weather || "clear"}`,
+      `Rumor: ${worldContext?.rumorOfTheDay || "none"}`,
+      `Recent town log: ${(townLog || []).slice(-10).join(" | ") || "none"}`,
+      `Areas: ${(areaNames || []).join(", ")}`,
+      `Roles: ${(roleNames || []).join(", ")}`
+    ].join("\n");
+
+    const response = await this.client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: `${IMMERSION_RULE}
+Design one short, doable, situational town mission based on current gossip/events.
+Mission must be grounded in what people are discussing.
+Objective must be one of: visit_area, talk_to_any_npc, talk_to_role, harvest_any.
+Keep it simple and completable within a short play session.`
+        },
+        {
+          role: "developer",
+          content:
+            "Return raw JSON only with keys: title, description, objectiveType, targetArea, targetRole, targetCount, gossip."
+        },
+        { role: "user", content: prompt }
+      ]
+    });
+
+    const text = response.output_text?.trim();
+    try {
+      const parsed = JSON.parse(extractJsonString(text));
+      return {
+        title: String(parsed.title || fallback.title).slice(0, 60),
+        description: String(parsed.description || fallback.description).slice(0, 180),
+        objectiveType: sanitizeMissionObjectiveType(parsed.objectiveType),
+        targetArea: parsed.targetArea ? String(parsed.targetArea).slice(0, 40) : null,
+        targetRole: parsed.targetRole ? String(parsed.targetRole).slice(0, 40) : null,
+        targetCount: Math.max(1, Math.min(4, Number(parsed.targetCount) || fallback.targetCount)),
+        gossip: String(parsed.gossip || fallback.gossip).slice(0, 180)
+      };
+    } catch {
+      return fallback;
     }
   }
 }

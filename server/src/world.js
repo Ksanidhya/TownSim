@@ -45,6 +45,42 @@ export const MISSION_CHAIN = [
   }
 ];
 
+const TOWN_MISSION_TEMPLATES = [
+  {
+    title: "Market Chatter",
+    description: "People are whispering near the stalls. Hear a few voices.",
+    objectiveType: "talk_to_any_npc",
+    targetCount: 2
+  },
+  {
+    title: "Square Watch",
+    description: "Something feels tense in Town Square. Stop by and check it out.",
+    objectiveType: "visit_area",
+    targetArea: "Town Square",
+    targetCount: 1
+  },
+  {
+    title: "Harbor Mood",
+    description: "Dock workers are restless. Visit the Dock and ask around.",
+    objectiveType: "visit_area",
+    targetArea: "Dock",
+    targetCount: 1
+  },
+  {
+    title: "Guard Briefing",
+    description: "The guard is collecting stories from townsfolk. Talk to Rook.",
+    objectiveType: "talk_to_role",
+    targetRole: "Town Guard",
+    targetCount: 1
+  },
+  {
+    title: "Fresh Produce",
+    description: "Town wants fresh food. Bring in a small harvest.",
+    objectiveType: "harvest_any",
+    targetCount: 1
+  }
+];
+
 function clampMissionIndex(index) {
   const max = MISSION_CHAIN.length;
   return Math.max(0, Math.min(max, Number(index) || 0));
@@ -54,7 +90,14 @@ export function createMissionProgress() {
   return {
     index: 0,
     harvestCount: 0,
-    spokenNpcIds: []
+    spokenNpcIds: [],
+    townMission: {
+      missionId: "",
+      count: 0,
+      visitedAreas: [],
+      talkedNpcIds: [],
+      talkedRoles: []
+    }
   };
 }
 
@@ -69,7 +112,122 @@ export function ensurePlayerMissionProgress(player) {
   if (!Number.isFinite(player.missionProgress.harvestCount)) {
     player.missionProgress.harvestCount = 0;
   }
+  if (!player.missionProgress.townMission || typeof player.missionProgress.townMission !== "object") {
+    player.missionProgress.townMission = {
+      missionId: "",
+      count: 0,
+      visitedAreas: [],
+      talkedNpcIds: [],
+      talkedRoles: []
+    };
+  }
+  const tm = player.missionProgress.townMission;
+  if (!Number.isFinite(tm.count)) tm.count = 0;
+  if (!Array.isArray(tm.visitedAreas)) tm.visitedAreas = [];
+  if (!Array.isArray(tm.talkedNpcIds)) tm.talkedNpcIds = [];
+  if (!Array.isArray(tm.talkedRoles)) tm.talkedRoles = [];
   return player.missionProgress;
+}
+
+function fallbackTownMission(state) {
+  const idx = Math.max(0, (state.dayNumber - 1) % TOWN_MISSION_TEMPLATES.length);
+  const template = TOWN_MISSION_TEMPLATES[idx];
+  return {
+    id: `town_${state.dayNumber}_${template.objectiveType.toLowerCase()}`,
+    source: "fallback",
+    title: template.title,
+    description: template.description,
+    objectiveType: template.objectiveType,
+    targetArea: template.targetArea || null,
+    targetRole: template.targetRole || null,
+    targetCount: Math.max(1, Number(template.targetCount) || 1),
+    gossip: state.rumorOfTheDay || "The town is restless today."
+  };
+}
+
+export function setTownMission(state, mission) {
+  const safe = mission && typeof mission === "object" ? mission : {};
+  const objectiveType = String(safe.objectiveType || "").trim().toLowerCase();
+  const allowed = new Set(["visit_area", "talk_to_any_npc", "talk_to_role", "harvest_any"]);
+  if (!allowed.has(objectiveType)) {
+    state.townMission = fallbackTownMission(state);
+    return state.townMission;
+  }
+
+  const targetCount = Math.max(1, Number(safe.targetCount) || 1);
+  state.townMission = {
+    id: String(safe.id || `town_${state.dayNumber}_${Date.now()}`),
+    source: String(safe.source || "ai"),
+    title: String(safe.title || "Town Request").slice(0, 60),
+    description: String(safe.description || "Help around town based on today's chatter.").slice(0, 180),
+    objectiveType,
+    targetArea: safe.targetArea ? String(safe.targetArea).slice(0, 40) : null,
+    targetRole: safe.targetRole ? String(safe.targetRole).slice(0, 40) : null,
+    targetCount,
+    gossip: String(safe.gossip || state.rumorOfTheDay || "").slice(0, 180)
+  };
+  return state.townMission;
+}
+
+function activeTownMission(state) {
+  if (!state.townMission) {
+    state.townMission = fallbackTownMission(state);
+  }
+  return state.townMission;
+}
+
+function townMissionProgressText(state, player) {
+  const mission = activeTownMission(state);
+  const progress = ensurePlayerMissionProgress(player).townMission;
+  const done = Math.min(progress.count, mission.targetCount || 1);
+  return `${done}/${mission.targetCount || 1}`;
+}
+
+export function applyTownMissionEvent(state, player, event) {
+  if (!state || !player || !event) return { changed: false };
+  const mission = activeTownMission(state);
+  const progress = ensurePlayerMissionProgress(player).townMission;
+  if (progress.missionId !== mission.id) {
+    progress.missionId = mission.id;
+    progress.count = 0;
+    progress.visitedAreas = [];
+    progress.talkedNpcIds = [];
+    progress.talkedRoles = [];
+  }
+
+  const countBefore = progress.count;
+  if (mission.objectiveType === "visit_area" && event.type === "move") {
+    const areaName = String(event.areaName || "").trim();
+    if (areaName && areaName === mission.targetArea && !progress.visitedAreas.includes(areaName)) {
+      progress.visitedAreas.push(areaName);
+      progress.count += 1;
+    }
+  }
+  if (mission.objectiveType === "talk_to_any_npc" && event.type === "talk_npc") {
+    const npcId = String(event.npcId || "").trim();
+    if (npcId && !progress.talkedNpcIds.includes(npcId)) {
+      progress.talkedNpcIds.push(npcId);
+      progress.count += 1;
+    }
+  }
+  if (mission.objectiveType === "talk_to_role" && event.type === "talk_npc_role") {
+    const role = String(event.role || "").trim();
+    if (role && role === mission.targetRole) {
+      progress.count += 1;
+    }
+  }
+  if (mission.objectiveType === "harvest_any" && event.type === "harvest_success") {
+    progress.count += 1;
+  }
+
+  const changed = progress.count !== countBefore;
+  const completed = progress.count >= (mission.targetCount || 1);
+  return {
+    changed,
+    completed,
+    mission,
+    progress: townMissionProgressText(state, player)
+  };
 }
 
 function currentMission(player) {
@@ -203,6 +361,29 @@ function missionSnapshot(player) {
   };
 }
 
+function townMissionSnapshot(state, player) {
+  const mission = activeTownMission(state);
+  const progress = ensurePlayerMissionProgress(player).townMission;
+  if (progress.missionId !== mission.id) {
+    progress.missionId = mission.id;
+    progress.count = 0;
+    progress.visitedAreas = [];
+    progress.talkedNpcIds = [];
+    progress.talkedRoles = [];
+  }
+  const count = Math.min(progress.count, mission.targetCount || 1);
+  const target = mission.targetCount || 1;
+  return {
+    id: mission.id,
+    title: mission.title,
+    description: mission.description,
+    gossip: mission.gossip || "",
+    objectiveType: mission.objectiveType,
+    progress: `${count}/${target}`,
+    completed: count >= target
+  };
+}
+
 function createPlot(col, row) {
   const id = row * FARM_COLS + col + 1;
   return {
@@ -250,15 +431,15 @@ function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-export function createPlayerFarmIfMissing(state, socketId) {
-  if (!state.farms.has(socketId)) {
-    state.farms.set(socketId, createPlayerFarm());
+export function createPlayerFarmIfMissing(state, ownerId) {
+  if (!state.farms.has(ownerId)) {
+    state.farms.set(ownerId, createPlayerFarm());
   }
-  return state.farms.get(socketId);
+  return state.farms.get(ownerId);
 }
 
-export function removePlayerFarm(state, socketId) {
-  state.farms.delete(socketId);
+export function removePlayerFarm(state, ownerId) {
+  state.farms.delete(ownerId);
 }
 
 export function tickFarmGrowth(state, deltaMinutes = 8) {
@@ -281,8 +462,8 @@ export function tickFarmGrowth(state, deltaMinutes = 8) {
   }
 }
 
-export function applyFarmAction({ state, socketId, action, plotId, cropType }) {
-  const farm = state.farms.get(socketId);
+export function applyFarmAction({ state, ownerId, action, plotId, cropType }) {
+  const farm = state.farms.get(ownerId);
   if (!farm) {
     return { ok: false, message: "Farm not found." };
   }
@@ -356,6 +537,10 @@ function findArea(x, y) {
   );
 }
 
+export function areaNameAt(x, y) {
+  return findArea(x, y).name;
+}
+
 export function createWorldState() {
   const npcs = NPC_SEEDS.map((seed) => ({
     ...seed,
@@ -364,7 +549,9 @@ export function createWorldState() {
     speed: 18 + Math.random() * 10,
     talkCooldownUntil: 0,
     holdUntil: 0,
-    playerNearby: false
+    playerNearby: false,
+    tasks: [],
+    moveControl: null
   }));
 
   return {
@@ -375,6 +562,7 @@ export function createWorldState() {
     rumorOfTheDay: "A hidden lantern was seen near the forest shrine.",
     dailyTownLog: [],
     yesterdayTownLog: [],
+    townMission: fallbackTownMission({ dayNumber: 1, rumorOfTheDay: "A hidden lantern was seen near the forest shrine." }),
     npcs,
     players: new Map(),
     farms: new Map()
@@ -419,6 +607,7 @@ function pickWanderTarget(area) {
 export function tickNpcMovement(state, dtSeconds = 1) {
   const awakePlayers = [...state.players.values()].filter((p) => !p.sleeping);
   const now = Date.now();
+  const playerByPlayerId = new Map(awakePlayers.map((p) => [p.playerId, p]));
 
   for (const npc of state.npcs) {
     const nearPlayer = awakePlayers.some(
@@ -429,7 +618,74 @@ export function tickNpcMovement(state, dtSeconds = 1) {
     }
     npc.playerNearby = nearPlayer;
 
-    if (now < npc.holdUntil) {
+    const control = npc.moveControl || null;
+    if (control && Number.isFinite(control.untilMinutes)) {
+      const untilDay = Number.isFinite(control.untilDay) ? control.untilDay : state.dayNumber;
+      const expired =
+        state.dayNumber > untilDay ||
+        (state.dayNumber === untilDay && state.timeMinutes >= control.untilMinutes);
+      if (expired) {
+        npc.moveControl = null;
+      }
+    }
+
+    const controlMode = npc.moveControl?.mode || "";
+    if (controlMode === "follow_player") {
+      const leader = playerByPlayerId.get(npc.moveControl?.playerId);
+      if (leader) {
+        npc.target = {
+          x: clamp(leader.x + (Math.random() * 36 - 18), 0, WORLD_WIDTH),
+          y: clamp(leader.y + (Math.random() * 36 - 18), 0, WORLD_HEIGHT)
+        };
+      }
+    } else if (controlMode === "keep_distance") {
+      const leader = playerByPlayerId.get(npc.moveControl?.playerId);
+      const preferred = Number.isFinite(npc.moveControl?.distance) ? npc.moveControl.distance : 110;
+      if (leader) {
+        const dx = npc.x - leader.x;
+        const dy = npc.y - leader.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < preferred - 10 || dist > preferred + 45) {
+          const baseDist = Math.max(1, dist);
+          const ux = dx / baseDist;
+          const uy = dy / baseDist;
+          npc.target = {
+            x: clamp(leader.x + ux * preferred + (Math.random() * 24 - 12), 0, WORLD_WIDTH),
+            y: clamp(leader.y + uy * preferred + (Math.random() * 24 - 12), 0, WORLD_HEIGHT)
+          };
+        } else {
+          npc.vx = 0;
+          npc.vy = 0;
+          continue;
+        }
+      }
+    } else if (controlMode === "point") {
+      const tx = Number(npc.moveControl?.x);
+      const ty = Number(npc.moveControl?.y);
+      if (Number.isFinite(tx) && Number.isFinite(ty)) {
+        npc.target = { x: tx, y: ty };
+      }
+    } else if (controlMode === "area") {
+      const area = AREAS.find((a) => a.name === npc.moveControl?.areaName);
+      if (area) {
+        if (npc.moveControl?.patrol) {
+          const reachedCurrent = npc.target
+            ? Math.hypot((npc.target.x || npc.x) - npc.x, (npc.target.y || npc.y) - npc.y) < 18
+            : true;
+          if (!npc.target || reachedCurrent || Math.random() < 0.03) {
+            npc.target = pickWanderTarget(area);
+          }
+        } else {
+          npc.target = { x: area.x + area.w / 2, y: area.y + area.h / 2 };
+        }
+      }
+    } else if (controlMode === "hold") {
+      npc.vx = 0;
+      npc.vy = 0;
+      continue;
+    }
+
+    if (!controlMode && now < npc.holdUntil) {
       npc.vx = 0;
       npc.vy = 0;
       continue;
@@ -459,7 +715,8 @@ export function tickNpcMovement(state, dtSeconds = 1) {
 
 export function snapshotWorld(state, socketId = null) {
   const player = socketId ? state.players.get(socketId) || null : null;
-  const farm = socketId ? state.farms.get(socketId) || null : null;
+  const ownerId = player?.playerId || null;
+  const farm = ownerId ? state.farms.get(ownerId) || null : null;
 
   return {
     dayNumber: state.dayNumber,
@@ -487,6 +744,7 @@ export function snapshotWorld(state, socketId = null) {
         }
       : null,
     mission: player ? missionSnapshot(player) : null,
+    townMission: player ? townMissionSnapshot(state, player) : null,
     farm: farm
       ? {
           home: farm.home,

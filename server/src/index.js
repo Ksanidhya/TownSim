@@ -3,6 +3,8 @@ import express from "express";
 import cors from "cors";
 import http from "node:http";
 import crypto from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { Server } from "socket.io";
 import {
   createPlayerAccount,
@@ -16,15 +18,19 @@ import {
   writeMemory
 } from "./db.js";
 import { DialogueService } from "./dialogue.js";
+import { AREAS } from "./constants.js";
 import {
+  applyTownMissionEvent,
   applyMissionEvent,
   applyFarmAction,
+  areaNameAt,
   createPlayerFarmIfMissing,
   createWorldState,
   ensurePlayerMissionProgress,
   findNearbyNpcPairs,
   pushTownEvent,
   removePlayerFarm,
+  setTownMission,
   snapshotWorld,
   tickClock,
   tickFarmGrowth,
@@ -33,6 +39,9 @@ import {
 
 const PORT = Number(process.env.PORT || 3002);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+const AUTOSAVE_INTERVAL_MS = Number(process.env.AUTOSAVE_INTERVAL_MS || 15000);
+const SAVE_DIR = path.resolve(process.cwd(), "data");
+const SAVE_PATH = path.join(SAVE_DIR, "world-save.json");
 
 const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN }));
@@ -62,6 +71,9 @@ let lastAutoDialogueAt = 0;
 let tickCount = 0;
 let npcConversationInProgress = false;
 let npcConversationCancelRequested = false;
+let npcTaskInProgress = false;
+let autosaveInProgress = false;
+const persistedProfiles = new Map();
 const TOWN_LIFE_TOPIC_HINTS = [
   "daily life in town",
   "work and personal mood today",
@@ -70,6 +82,411 @@ const TOWN_LIFE_TOPIC_HINTS = [
   "weather and how it affects plans",
   "small worries and hopes"
 ];
+
+function cleanForMatch(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function findNpcByNameLike(nameRaw) {
+  const needle = cleanForMatch(nameRaw);
+  if (!needle) return null;
+  return (
+    world.npcs.find((npc) => cleanForMatch(npc.name) === needle) ||
+    world.npcs.find((npc) => cleanForMatch(npc.name).includes(needle) || needle.includes(cleanForMatch(npc.name))) ||
+    null
+  );
+}
+
+function findAreaByNameLike(nameRaw) {
+  const needle = cleanForMatch(nameRaw);
+  if (!needle) return null;
+  return (
+    AREAS.find((area) => cleanForMatch(area.name) === needle) ||
+    AREAS.find((area) => cleanForMatch(area.name).includes(needle) || needle.includes(cleanForMatch(area.name))) ||
+    null
+  );
+}
+
+function parseTimeExpression(raw) {
+  const text = String(raw || "").trim().toLowerCase();
+  if (!text) return null;
+  const map = {
+    dawn: 6 * 60,
+    morning: 8 * 60,
+    noon: 12 * 60,
+    afternoon: 15 * 60,
+    dusk: 16 * 60,
+    evening: 18 * 60,
+    night: 20 * 60,
+    midnight: 0
+  };
+  if (Object.prototype.hasOwnProperty.call(map, text)) return map[text];
+
+  const match = text.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2] || 0);
+  const suffix = String(match[3] || "").toLowerCase();
+  if (minute < 0 || minute > 59 || hour < 0 || hour > 23) return null;
+  if (suffix) {
+    if (hour < 1 || hour > 12) return null;
+    if (suffix === "am") {
+      hour = hour === 12 ? 0 : hour;
+    } else {
+      hour = hour === 12 ? 12 : hour + 12;
+    }
+  }
+  return hour * 60 + minute;
+}
+
+function formatMinutesClock(minutes) {
+  if (!Number.isFinite(minutes)) return "";
+  const total = ((minutes % (24 * 60)) + 24 * 60) % (24 * 60);
+  const h24 = Math.floor(total / 60);
+  const mins = total % 60;
+  const suffix = h24 >= 12 ? "PM" : "AM";
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}:${String(mins).padStart(2, "0")} ${suffix}`;
+}
+
+function parseNpcTaskCommand(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  const talkPattern =
+    /\b(?:talk|speak|chat)\s+to\s+([a-zA-Z\s'.-]+?)\s+about\s+(.+)$/i;
+  const talkMatch = raw.match(talkPattern);
+  if (talkMatch) {
+    return {
+      type: "talk_to_npc",
+      targetNpcName: talkMatch[1].trim(),
+      topic: talkMatch[2].trim()
+    };
+  }
+
+  const observePattern =
+    /\b(?:observe|watch|check|patrol)(?:\s+(?:the\s+)?([a-zA-Z\s'.-]+?))?(?:\s+at\s+([a-zA-Z0-9:\s]+))?$/i;
+  const observeMatch = raw.match(observePattern);
+  if (observeMatch) {
+    const areaName = String(observeMatch[1] || "").trim();
+    return {
+      type: "observe_area",
+      areaName: areaName || "anywhere",
+      atTimeText: String(observeMatch[2] || "").trim()
+    };
+  }
+
+  return null;
+}
+
+function parseNpcMovementCommand(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  const followUntilMatch = raw.match(/^follow me until (.+)$/i);
+  if (followUntilMatch) {
+    return { type: "follow_player_until", untilText: followUntilMatch[1].trim() };
+  }
+
+  if (/^(follow me|come with me)$/i.test(raw)) {
+    return { type: "follow_player" };
+  }
+  if (/^(keep distance|keep your distance|stay back)$/i.test(raw)) {
+    return { type: "keep_distance" };
+  }
+  if (/^(return to your routine|return to routine|resume routine|go back to normal)$/i.test(raw)) {
+    return { type: "return_routine" };
+  }
+  if (/^(go to my house|go to my home|head to my house)$/i.test(raw)) {
+    return { type: "go_player_home" };
+  }
+  if (/^(stop|hold|stay(?: here)?)$/i.test(raw)) {
+    return { type: "hold" };
+  }
+
+  const goMatch = raw.match(/^(?:go|move|head|walk)\s+to\s+(.+)$/i);
+  if (goMatch) {
+    return { type: "go_area", areaName: goMatch[1].trim() };
+  }
+
+  const patrolMatch = raw.match(/^patrol\s+(.+)$/i);
+  if (patrolMatch) {
+    return { type: "patrol_area", areaName: patrolMatch[1].trim() };
+  }
+
+  return null;
+}
+
+function getSocketIdByPlayerId(playerId) {
+  for (const [socketId, player] of world.players.entries()) {
+    if (player?.playerId === playerId) return socketId;
+  }
+  return null;
+}
+
+function notifyPlayerByPlayerId(playerId, message, ok = true) {
+  const socketId = getSocketIdByPlayerId(playerId);
+  if (!socketId) return;
+  io.to(socketId).emit("farm_feedback", { ok, message });
+  emitWorldToPlayer(socketId, "world_tick");
+}
+
+function nearestNpcToPlayer(player, maxDistance = PLAYER_NEAR_DISTANCE + 20) {
+  if (!player) return null;
+  let best = null;
+  let bestDist = Infinity;
+  for (const npc of world.npcs) {
+    const dist = Math.hypot(npc.x - player.x, npc.y - player.y);
+    if (dist <= maxDistance && dist < bestDist) {
+      best = npc;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+function applyNpcMovementControl({ npc, player, parsed }) {
+  if (!npc || !player || !parsed?.type) {
+    return { ok: false, message: "Invalid movement command." };
+  }
+  if (!Array.isArray(npc.tasks)) npc.tasks = [];
+  npc.tasks = [];
+
+  if (parsed.type === "return_routine") {
+    npc.moveControl = null;
+    npc.target = null;
+    return { ok: true, message: `${npc.name} returned to their normal routine.` };
+  }
+
+  if (parsed.type === "follow_player_until") {
+    const untilMinutes = parseTimeExpression(parsed.untilText);
+    if (!Number.isFinite(untilMinutes)) {
+      return { ok: false, message: `Couldn't understand time "${parsed.untilText}".` };
+    }
+    const untilDay = untilMinutes <= world.timeMinutes ? world.dayNumber + 1 : world.dayNumber;
+    npc.moveControl = {
+      mode: "follow_player",
+      playerId: player.playerId,
+      untilMinutes,
+      untilDay
+    };
+    npc.holdUntil = 0;
+    return {
+      ok: true,
+      message: `${npc.name} will follow you until ${formatMinutesClock(untilMinutes)}.`
+    };
+  }
+
+  if (parsed.type === "follow_player") {
+    npc.moveControl = {
+      mode: "follow_player",
+      playerId: player.playerId
+    };
+    npc.holdUntil = 0;
+    return { ok: true, message: `${npc.name} will follow you.` };
+  }
+
+  if (parsed.type === "hold") {
+    npc.moveControl = { mode: "hold" };
+    npc.target = null;
+    return { ok: true, message: `${npc.name} will hold position.` };
+  }
+
+  if (parsed.type === "keep_distance") {
+    npc.moveControl = {
+      mode: "keep_distance",
+      playerId: player.playerId,
+      distance: 110
+    };
+    npc.holdUntil = 0;
+    return { ok: true, message: `${npc.name} will keep some distance from you.` };
+  }
+
+  if (parsed.type === "go_player_home") {
+    const farm = world.farms.get(player.playerId);
+    if (!farm?.home) {
+      return { ok: false, message: "Couldn't find your house location yet." };
+    }
+    npc.moveControl = {
+      mode: "point",
+      x: farm.home.x,
+      y: farm.home.y,
+      label: "your house"
+    };
+    npc.target = { x: farm.home.x, y: farm.home.y };
+    npc.holdUntil = 0;
+    return { ok: true, message: `${npc.name} is heading to your house.` };
+  }
+
+  if (parsed.type === "go_area" || parsed.type === "patrol_area") {
+    const area = findAreaByNameLike(parsed.areaName);
+    if (!area) {
+      return { ok: false, message: `Couldn't find area "${parsed.areaName}".` };
+    }
+    npc.moveControl = {
+      mode: "area",
+      areaName: area.name,
+      patrol: parsed.type === "patrol_area"
+    };
+    npc.holdUntil = 0;
+    if (!npc.moveControl.patrol) {
+      npc.target = { x: area.x + area.w / 2, y: area.y + area.h / 2 };
+    }
+    return {
+      ok: true,
+      message:
+        parsed.type === "patrol_area"
+          ? `${npc.name} will patrol ${area.name}.`
+          : `${npc.name} is heading to ${area.name}.`
+    };
+  }
+
+  return { ok: false, message: "Unsupported movement command." };
+}
+
+function queueNpcTask({ npc, assignedByPlayerId, assignedByPlayerName, parsed }) {
+  if (!npc || !parsed || !parsed.type) {
+    return { ok: false, error: "Invalid task request." };
+  }
+  if (!Array.isArray(npc.tasks)) npc.tasks = [];
+  if (npc.tasks.length >= 4) {
+    return { ok: false, error: `${npc.name} is already busy with other requests.` };
+  }
+
+  if (parsed.type === "talk_to_npc") {
+    const targetNpc = findNpcByNameLike(parsed.targetNpcName);
+    if (!targetNpc) {
+      return { ok: false, error: `Couldn't find "${parsed.targetNpcName}" in town.` };
+    }
+    if (targetNpc.id === npc.id) {
+      return { ok: false, error: `${npc.name} cannot be asked to talk to themselves.` };
+    }
+    const task = {
+      id: `task_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+      type: "talk_to_npc",
+      status: "pending",
+      targetNpcId: targetNpc.id,
+      topic: String(parsed.topic || "").slice(0, 180),
+      assignedByPlayerId,
+      assignedByPlayerName,
+      createdAt: Date.now()
+    };
+    npc.tasks.push(task);
+    return { ok: true, message: `${npc.name} will talk to ${targetNpc.name} about "${task.topic}".` };
+  }
+
+  if (parsed.type === "observe_area") {
+    const areaText = cleanForMatch(parsed.areaName);
+    const isAnywhere =
+      !areaText || areaText === "anywhere" || areaText === "around town" || areaText === "town";
+    const area = isAnywhere ? null : findAreaByNameLike(parsed.areaName);
+    if (!isAnywhere && !area) {
+      return { ok: false, error: `Couldn't find area "${parsed.areaName}". Try 'anywhere'.` };
+    }
+    const atMinutes = parsed.atTimeText ? parseTimeExpression(parsed.atTimeText) : null;
+    const scheduleDay =
+      Number.isFinite(atMinutes) && atMinutes <= world.timeMinutes ? world.dayNumber + 1 : world.dayNumber;
+
+    const task = {
+      id: `task_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+      type: "observe_area",
+      status: "pending",
+      areaName: area ? area.name : null,
+      atMinutes: Number.isFinite(atMinutes) ? atMinutes : null,
+      scheduleDay,
+      assignedByPlayerId,
+      assignedByPlayerName,
+      createdAt: Date.now()
+    };
+    npc.tasks.push(task);
+    const whenText = Number.isFinite(task.atMinutes) ? ` at ${formatMinutesClock(task.atMinutes)}` : " now";
+    const areaLabel = area ? area.name : "around town";
+    return { ok: true, message: `${npc.name} will observe ${areaLabel}${whenText}.` };
+  }
+
+  return { ok: false, error: "Unsupported task type." };
+}
+
+function handleNpcTaskCommand({ socket, player, text, preferredNpcId = null }) {
+  const parsed = parseNpcTaskCommand(text);
+  if (!parsed) return { handled: false };
+
+  const preferredNpc = preferredNpcId ? world.npcs.find((n) => n.id === preferredNpcId) || null : null;
+  const npc = preferredNpc || nearestNpcToPlayer(player);
+  if (!npc) {
+    socket.emit("farm_feedback", {
+      ok: false,
+      message: "No nearby NPC to assign that request. Stand near someone first."
+    });
+    return { handled: true };
+  }
+
+  const queued = queueNpcTask({
+    npc,
+    assignedByPlayerId: player.playerId,
+    assignedByPlayerName: player.name || "Traveler",
+    parsed
+  });
+  const responseText = queued.ok ? `${queued.message} I'll report back.` : `${queued.error}`;
+  io.emit("dialogue_event", {
+    type: "npc_to_player",
+    speakerId: npc.id,
+    speakerName: npc.name,
+    targetId: socket.id,
+    targetName: "You",
+    text: responseText,
+    emotion: queued.ok ? "focused" : "neutral",
+    x: npc.x,
+    y: npc.y,
+    timeLabel: snapshotWorld(world).timeLabel,
+    needsContinue: false,
+    waitingForReply: true,
+    dialogueTurn: 1,
+    dialogueMax: 1
+  });
+  socket.emit("dialogue_waiting_reply", { npcId: npc.id, npcName: npc.name });
+  return { handled: true };
+}
+
+function handleNpcMovementCommand({ socket, player, text, preferredNpcId = null }) {
+  const parsed = parseNpcMovementCommand(text);
+  if (!parsed) return { handled: false };
+
+  const preferredNpc = preferredNpcId ? world.npcs.find((n) => n.id === preferredNpcId) || null : null;
+  const npc = preferredNpc || nearestNpcToPlayer(player);
+  if (!npc) {
+    socket.emit("farm_feedback", {
+      ok: false,
+      message: "No nearby NPC to command. Stand near someone first."
+    });
+    return { handled: true };
+  }
+
+  const applied = applyNpcMovementControl({ npc, player, parsed });
+  io.emit("dialogue_event", {
+    type: "npc_to_player",
+    speakerId: npc.id,
+    speakerName: npc.name,
+    targetId: socket.id,
+    targetName: "You",
+    text: applied.message,
+    emotion: applied.ok ? "focused" : "neutral",
+    x: npc.x,
+    y: npc.y,
+    timeLabel: snapshotWorld(world).timeLabel,
+    needsContinue: false,
+    waitingForReply: true,
+    dialogueTurn: 1,
+    dialogueMax: 1
+  });
+  socket.emit("dialogue_waiting_reply", { npcId: npc.id, npcName: npc.name });
+  emitWorldToPlayer(socket.id, "world_tick");
+  return { handled: true };
+}
 
 function normalizeUsername(value) {
   return String(value || "")
@@ -84,6 +501,133 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+function safeClone(value, fallback = null) {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return fallback;
+  }
+}
+
+function captureConnectedPlayerProfile(player) {
+  if (!player?.playerId) return null;
+  const farm = world.farms.get(player.playerId);
+  return {
+    playerId: player.playerId,
+    name: player.name || "Traveler",
+    gender: player.gender || "unspecified",
+    x: Number.isFinite(player.x) ? player.x : 680,
+    y: Number.isFinite(player.y) ? player.y : 220,
+    missionProgress: safeClone(player.missionProgress, null),
+    farm: safeClone(farm, null)
+  };
+}
+
+function refreshPersistedProfile(player) {
+  const snapshot = captureConnectedPlayerProfile(player);
+  if (!snapshot?.playerId) return;
+  persistedProfiles.set(snapshot.playerId, snapshot);
+}
+
+function normalizeNpcForLoad(seedNpc, loadedNpc) {
+  const next = { ...seedNpc };
+  const src = loadedNpc && typeof loadedNpc === "object" ? loadedNpc : {};
+  if (Number.isFinite(src.x)) next.x = src.x;
+  if (Number.isFinite(src.y)) next.y = src.y;
+  if (Number.isFinite(src.vx)) next.vx = src.vx;
+  if (Number.isFinite(src.vy)) next.vy = src.vy;
+  if (Number.isFinite(src.speed)) next.speed = src.speed;
+  if (Number.isFinite(src.talkCooldownUntil)) next.talkCooldownUntil = src.talkCooldownUntil;
+  if (Number.isFinite(src.holdUntil)) next.holdUntil = src.holdUntil;
+  if (typeof src.area === "string" && src.area.trim()) next.area = src.area;
+  if (src.target && Number.isFinite(src.target.x) && Number.isFinite(src.target.y)) {
+    next.target = { x: src.target.x, y: src.target.y };
+  }
+  next.playerNearby = Boolean(src.playerNearby);
+  next.tasks = Array.isArray(src.tasks) ? src.tasks.slice(0, 6) : [];
+  next.moveControl = src.moveControl && typeof src.moveControl === "object" ? src.moveControl : null;
+  return next;
+}
+
+async function loadAutosave() {
+  try {
+    const raw = await readFile(SAVE_PATH, "utf-8");
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object") return false;
+
+    if (Number.isFinite(data.dayNumber)) world.dayNumber = data.dayNumber;
+    if (Number.isFinite(data.timeMinutes)) world.timeMinutes = data.timeMinutes;
+    if (typeof data.weather === "string") world.weather = data.weather;
+    if (typeof data.rumorOfTheDay === "string") world.rumorOfTheDay = data.rumorOfTheDay;
+    if (Array.isArray(data.dailyTownLog)) world.dailyTownLog = data.dailyTownLog.slice(-80);
+    if (Array.isArray(data.yesterdayTownLog)) world.yesterdayTownLog = data.yesterdayTownLog.slice(-80);
+    if (data.townMission && typeof data.townMission === "object") {
+      setTownMission(world, data.townMission);
+    }
+
+    const loadedNpcById = new Map((Array.isArray(data.npcs) ? data.npcs : []).map((n) => [n.id, n]));
+    world.npcs = world.npcs.map((seedNpc) => normalizeNpcForLoad(seedNpc, loadedNpcById.get(seedNpc.id)));
+
+    world.farms.clear();
+    const farmsObj = data.farms && typeof data.farms === "object" ? data.farms : {};
+    for (const [ownerId, farm] of Object.entries(farmsObj)) {
+      if (!ownerId || !farm || typeof farm !== "object") continue;
+      world.farms.set(ownerId, farm);
+    }
+
+    persistedProfiles.clear();
+    const profilesObj = data.persistedProfiles && typeof data.persistedProfiles === "object" ? data.persistedProfiles : {};
+    for (const [playerId, profile] of Object.entries(profilesObj)) {
+      if (!playerId || !profile || typeof profile !== "object") continue;
+      persistedProfiles.set(playerId, profile);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function saveAutosave() {
+  if (autosaveInProgress) return;
+  autosaveInProgress = true;
+  try {
+    for (const player of world.players.values()) {
+      refreshPersistedProfile(player);
+    }
+
+    const farmsObject = {};
+    for (const [ownerId, farm] of world.farms.entries()) {
+      farmsObject[ownerId] = safeClone(farm, null);
+    }
+    const profilesObject = {};
+    for (const [playerId, profile] of persistedProfiles.entries()) {
+      profilesObject[playerId] = safeClone(profile, null);
+    }
+
+    const payload = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      dayNumber: world.dayNumber,
+      timeMinutes: world.timeMinutes,
+      weather: world.weather,
+      rumorOfTheDay: world.rumorOfTheDay,
+      dailyTownLog: world.dailyTownLog,
+      yesterdayTownLog: world.yesterdayTownLog,
+      townMission: safeClone(world.townMission, null),
+      npcs: safeClone(world.npcs, []),
+      farms: farmsObject,
+      persistedProfiles: profilesObject
+    };
+
+    await mkdir(SAVE_DIR, { recursive: true });
+    await writeFile(SAVE_PATH, JSON.stringify(payload, null, 2), "utf-8");
+  } catch (err) {
+    console.error("autosave error:", err.message);
+  } finally {
+    autosaveInProgress = false;
+  }
+}
+
 function applyMissionProgressAndNotify(socket, player, missionEvent) {
   if (!socket || !player || !missionEvent) return false;
   const result = applyMissionEvent(player, missionEvent);
@@ -96,6 +640,21 @@ function applyMissionProgressAndNotify(socket, player, missionEvent) {
     socket.emit("farm_feedback", {
       ok: true,
       message: `Mission complete: ${result.completedMission.title}.${nextText}`
+    });
+  }
+  emitWorldToPlayer(socket.id, "world_tick");
+  return true;
+}
+
+function applyTownMissionProgressAndNotify(socket, player, missionEvent) {
+  if (!socket || !player || !missionEvent) return false;
+  const result = applyTownMissionEvent(world, player, missionEvent);
+  if (!result?.changed) return false;
+
+  if (result.completed) {
+    socket.emit("farm_feedback", {
+      ok: true,
+      message: `Gossip mission complete: ${result.mission?.title || "Town request"}`
     });
   }
   emitWorldToPlayer(socket.id, "world_tick");
@@ -229,15 +788,21 @@ io.on("connection", (socket) => {
   const allowedGenders = new Set(["male", "female", "non-binary"]);
   const playerGender =
     typeof genderRaw === "string" && allowedGenders.has(genderRaw) ? genderRaw : "unspecified";
-  const farm = createPlayerFarmIfMissing(world, socket.id);
+  const restored = persistedProfiles.get(playerId) || null;
+  if (restored?.farm && typeof restored.farm === "object") {
+    world.farms.set(playerId, safeClone(restored.farm, null) || createPlayerFarmIfMissing(world, playerId));
+  }
+  const farm = createPlayerFarmIfMissing(world, playerId);
+  const spawnX = Number.isFinite(restored?.x) ? restored.x : farm.home.x;
+  const spawnY = Number.isFinite(restored?.y) ? restored.y : farm.home.y;
 
   world.players.set(socket.id, {
     id: socket.id,
     playerId,
     name: playerName,
     gender: playerGender,
-    x: farm.home.x,
-    y: farm.home.y,
+    x: spawnX,
+    y: spawnY,
     sleeping: false,
     inDialogue: false,
     dialogueNpcId: null,
@@ -247,9 +812,11 @@ io.on("connection", (socket) => {
     waitingForPlayerReply: false,
     waitingAnchorX: null,
     waitingAnchorY: null,
-    connectedAt: Date.now()
+    connectedAt: Date.now(),
+    missionProgress: safeClone(restored?.missionProgress, null)
   });
   ensurePlayerMissionProgress(world.players.get(socket.id));
+  refreshPersistedProfile(world.players.get(socket.id));
   socket.emit("world_snapshot", snapshotWorld(world, socket.id));
 
   socket.on("player_move", (payload) => {
@@ -277,7 +844,18 @@ io.on("connection", (socket) => {
     }
     player.x = x;
     player.y = y;
-    applyMissionProgressAndNotify(socket, player, { type: "move", x, y });
+    const areaName = areaNameAt(x, y);
+    const mainChanged = applyMissionProgressAndNotify(socket, player, { type: "move", x, y });
+    const townChanged = applyTownMissionProgressAndNotify(socket, player, {
+      type: "move",
+      x,
+      y,
+      areaName
+    });
+    if (!mainChanged && !townChanged) {
+      // No-op: regular world sync happens on tick.
+    }
+    refreshPersistedProfile(player);
   });
 
   socket.on("player_state", (payload) => {
@@ -290,10 +868,24 @@ io.on("connection", (socket) => {
     try {
       const player = world.players.get(socket.id);
       if (!player || player.sleeping) return;
-      if (!player.inDialogue && npcConversationInProgress) return;
 
       const text = String(payload?.text || "").trim().slice(0, 240);
       if (!text) return;
+      const movementCommandAttempt = handleNpcMovementCommand({
+        socket,
+        player,
+        text,
+        preferredNpcId: player.inDialogue ? player.dialogueNpcId : null
+      });
+      if (movementCommandAttempt.handled) return;
+      const commandAttempt = handleNpcTaskCommand({
+        socket,
+        player,
+        text,
+        preferredNpcId: player.inDialogue ? player.dialogueNpcId : null
+      });
+      if (commandAttempt.handled) return;
+      if (!player.inDialogue && npcConversationInProgress) return;
 
       if (player.inDialogue && player.dialogueNpcId && player.waitingForPlayerReply) {
         const npc = world.npcs.find((n) => n.id === player.dialogueNpcId);
@@ -405,6 +997,14 @@ io.on("connection", (socket) => {
       const dist = Math.hypot(npc.x - player.x, npc.y - player.y);
       if (dist > PLAYER_NEAR_DISTANCE) return;
       applyMissionProgressAndNotify(socket, player, { type: "talk_npc", npcId: npc.id });
+      applyTownMissionProgressAndNotify(socket, player, {
+        type: "talk_npc",
+        npcId: npc.id
+      });
+      applyTownMissionProgressAndNotify(socket, player, {
+        type: "talk_npc_role",
+        role: npc.role
+      });
 
       const context = snapshotWorld(world, socket.id);
 
@@ -456,7 +1056,7 @@ io.on("connection", (socket) => {
 
   socket.on("farm_action", (payload) => {
     const player = world.players.get(socket.id);
-    const farmState = world.farms.get(socket.id);
+    const farmState = world.farms.get(player?.playerId);
     if (!player || !farmState || player.inDialogue) return;
 
     const plotId = Number(payload?.plotId);
@@ -474,11 +1074,15 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const result = applyFarmAction({ state: world, socketId: socket.id, action, plotId, cropType });
+    const result = applyFarmAction({ state: world, ownerId: player.playerId, action, plotId, cropType });
     socket.emit("farm_feedback", result);
+    refreshPersistedProfile(player);
     const missionChanged =
       result?.ok && action === "harvest"
-        ? applyMissionProgressAndNotify(socket, player, { type: "harvest_success" })
+        ? [
+            applyMissionProgressAndNotify(socket, player, { type: "harvest_success" }),
+            applyTownMissionProgressAndNotify(socket, player, { type: "harvest_success" })
+          ].some(Boolean)
         : false;
     if (!missionChanged) {
       socket.emit("world_tick", snapshotWorld(world, socket.id));
@@ -486,8 +1090,15 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
+    const player = world.players.get(socket.id);
+    if (player) {
+      refreshPersistedProfile(player);
+    }
     world.players.delete(socket.id);
-    removePlayerFarm(world, socket.id);
+    if (String(playerId).startsWith("guest_")) {
+      persistedProfiles.delete(playerId);
+      removePlayerFarm(world, playerId);
+    }
   });
 });
 
@@ -525,10 +1136,41 @@ function buildMorningSummary(state) {
   return picks.map((line, idx) => `${idx + 1}. ${line}`).join("\n");
 }
 
+async function refreshTownMission() {
+  const context = snapshotWorld(world);
+  const areaNames = [...new Set(world.npcs.map((npc) => npc.area))];
+  const roleNames = [...new Set(world.npcs.map((npc) => npc.role))];
+
+  try {
+    const generated = await dialogueService.generateTownMission({
+      worldContext: context,
+      townLog: world.yesterdayTownLog || [],
+      areaNames,
+      roleNames
+    });
+    const mission = setTownMission(world, {
+      ...generated,
+      id: `town_${world.dayNumber}_${Date.now()}`
+    });
+    if (mission?.gossip) {
+      world.rumorOfTheDay = mission.gossip;
+    }
+  } catch (err) {
+    console.error("town mission generation error:", err.message);
+    const mission = setTownMission(world, null);
+    if (mission?.gossip) {
+      world.rumorOfTheDay = mission.gossip;
+    }
+  }
+}
+
 function runMorningReset(reason = "new_day") {
   const summary = buildMorningSummary(world);
+  refreshTownMission().then(() => {
+    emitWorldToAllPlayers("world_tick");
+  });
   for (const [socketId, player] of world.players.entries()) {
-    const farm = world.farms.get(socketId);
+    const farm = world.farms.get(player.playerId);
     if (farm?.home) {
       player.x = farm.home.x;
       player.y = farm.home.y;
@@ -627,6 +1269,160 @@ function emitNpcLine({
     dialogueTurn,
     dialogueMax
   });
+}
+
+function cleanupNpcTasks(npc) {
+  if (!Array.isArray(npc.tasks)) {
+    npc.tasks = [];
+    return;
+  }
+  npc.tasks = npc.tasks.filter((task) => task.status !== "completed" && task.status !== "failed");
+}
+
+function nextActiveTask(npc) {
+  if (!Array.isArray(npc.tasks) || npc.tasks.length === 0) return null;
+  return npc.tasks.find((task) => task.status === "pending" || task.status === "in_progress") || null;
+}
+
+function isObserveTaskReady(task) {
+  if (!task || task.type !== "observe_area") return false;
+  if (!Number.isFinite(task.atMinutes)) return true;
+  const day = Number.isFinite(task.scheduleDay) ? task.scheduleDay : world.dayNumber;
+  if (world.dayNumber > day) return true;
+  if (world.dayNumber < day) return false;
+  return world.timeMinutes >= task.atMinutes;
+}
+
+async function maybeProcessNpcTasks() {
+  if (npcTaskInProgress || npcConversationInProgress || anyPlayerInDialogue()) return false;
+  const now = Date.now();
+
+  for (const npc of world.npcs) {
+    cleanupNpcTasks(npc);
+    const task = nextActiveTask(npc);
+    if (!task) continue;
+
+    if (task.type === "observe_area") {
+      if (!isObserveTaskReady(task)) continue;
+      task.status = "in_progress";
+      if (!task.areaName) {
+        task.status = "completed";
+        cleanupNpcTasks(npc);
+        const atText = Number.isFinite(task.atMinutes) ? ` at ${formatMinutesClock(task.atMinutes)}` : "";
+        pushTownEvent(world, `${npc.name} observed ${npc.area}${atText} and took mental notes.`);
+        notifyPlayerByPlayerId(
+          task.assignedByPlayerId,
+          `${npc.name} finished observing around town${atText}.`,
+          true
+        );
+        return true;
+      }
+
+      const area = AREAS.find((a) => a.name === task.areaName);
+      if (!area) {
+        task.status = "failed";
+        notifyPlayerByPlayerId(task.assignedByPlayerId, `${npc.name} could not find ${task.areaName}.`, false);
+        cleanupNpcTasks(npc);
+        return true;
+      }
+
+      if (npc.area !== area.name) {
+        npc.target = {
+          x: area.x + area.w / 2 + (Math.random() * 30 - 15),
+          y: area.y + area.h / 2 + (Math.random() * 30 - 15)
+        };
+        return false;
+      }
+
+      task.status = "completed";
+      cleanupNpcTasks(npc);
+      const atText = Number.isFinite(task.atMinutes) ? ` at ${formatMinutesClock(task.atMinutes)}` : "";
+      pushTownEvent(world, `${npc.name} observed ${area.name}${atText} and took mental notes.`);
+      notifyPlayerByPlayerId(
+        task.assignedByPlayerId,
+        `${npc.name} finished observing ${area.name}${atText}.`,
+        true
+      );
+      return true;
+    }
+
+    if (task.type === "talk_to_npc") {
+      const target = world.npcs.find((n) => n.id === task.targetNpcId);
+      if (!target) {
+        task.status = "failed";
+        notifyPlayerByPlayerId(task.assignedByPlayerId, `${npc.name} could not find that person anymore.`, false);
+        cleanupNpcTasks(npc);
+        return true;
+      }
+
+      const dist = Math.hypot(npc.x - target.x, npc.y - target.y);
+      if (dist > 120) {
+        task.status = "in_progress";
+        npc.target = { x: target.x, y: target.y };
+        return false;
+      }
+      if (npc.talkCooldownUntil > now || target.talkCooldownUntil > now) {
+        continue;
+      }
+
+      npcTaskInProgress = true;
+      try {
+        const context = snapshotWorld(world);
+        const line = await dialogueService.generateNpcLine({
+          speaker: npc,
+          target,
+          worldContext: context,
+          memories: await getRecentMemories(db, npc.id, 4),
+          topicHint: `player-requested topic from ${task.assignedByPlayerName || "player"}: ${task.topic}`
+        });
+
+        io.emit("dialogue_event", {
+          type: "npc_to_npc",
+          speakerId: npc.id,
+          speakerName: npc.name,
+          targetId: target.id,
+          targetName: target.name,
+          text: line.line,
+          emotion: line.emotion,
+          x: npc.x,
+          y: npc.y,
+          timeLabel: context.timeLabel
+        });
+        await writeMemory(db, {
+          npcId: npc.id,
+          type: "conversation",
+          content: line.memoryWrite || `${npc.name} discussed ${task.topic} with ${target.name}.`,
+          importance: 4,
+          tags: `${npc.role},${target.role},player_request`,
+          createdAt: new Date().toISOString()
+        });
+        task.status = "completed";
+        cleanupNpcTasks(npc);
+        npc.talkCooldownUntil = now + NPC_COOLDOWN_MS;
+        target.talkCooldownUntil = now + NPC_COOLDOWN_MS;
+        pushTownEvent(world, `${npc.name} talked to ${target.name} about ${task.topic}.`);
+        notifyPlayerByPlayerId(
+          task.assignedByPlayerId,
+          `${npc.name} spoke to ${target.name} about "${task.topic}".`,
+          true
+        );
+        return true;
+      } catch (err) {
+        task.status = "failed";
+        cleanupNpcTasks(npc);
+        notifyPlayerByPlayerId(
+          task.assignedByPlayerId,
+          `${npc.name} could not complete the request right now.`,
+          false
+        );
+        console.error("npc task error:", err.message);
+        return true;
+      } finally {
+        npcTaskInProgress = false;
+      }
+    }
+  }
+  return false;
 }
 
 async function startPlayerDialogue({ socket, player, npc, context, topicHint }) {
@@ -791,7 +1587,7 @@ async function maybeTriggerNpcConversation() {
 setInterval(async () => {
   tickCount += 1;
   const dialogueActive = anyPlayerInDialogue();
-  const simulationPaused = dialogueActive || npcConversationInProgress;
+  const simulationPaused = dialogueActive || npcConversationInProgress || npcTaskInProgress;
   let dayChanged = false;
   let skippedNight = false;
   if (!simulationPaused) {
@@ -814,8 +1610,10 @@ setInterval(async () => {
   }
 
   try {
+    const taskHandled = !simulationPaused ? await maybeProcessNpcTasks() : false;
     if (
       !simulationPaused &&
+      !taskHandled &&
       !dayChanged &&
       !skippedNight &&
       awakePlayers.length > 0 &&
@@ -830,6 +1628,26 @@ setInterval(async () => {
 
 async function boot() {
   await ensureSchema(db);
+  await loadAutosave();
+  await refreshTownMission();
+  setInterval(() => {
+    saveAutosave();
+  }, AUTOSAVE_INTERVAL_MS);
+
+  const flushAndExit = async (code = 0) => {
+    try {
+      await saveAutosave();
+    } finally {
+      process.exit(code);
+    }
+  };
+  process.on("SIGINT", () => {
+    flushAndExit(0);
+  });
+  process.on("SIGTERM", () => {
+    flushAndExit(0);
+  });
+
   server.listen(PORT, () => {
     console.log(`Town sim server running on http://localhost:${PORT}`);
   });
