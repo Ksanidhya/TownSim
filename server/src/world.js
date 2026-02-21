@@ -9,6 +9,9 @@ const FARM_ORIGIN = { x: 600, y: 250 };
 const FARM_COLS = 3;
 const FARM_ROWS = 3;
 const FARM_GAP = 42;
+const NPC_PLAYER_HOLD_DISTANCE = 70;
+const NPC_PLAYER_HOLD_MS = 5000;
+const DAY_BOUNDARY_MINUTES = 6 * 60;
 
 export const CROP_CONFIG = {
   turnip: { label: "Turnip", growMinutes: 180, seedCost: 6, minYield: 1, maxYield: 2, sellPrice: 8 },
@@ -175,14 +178,19 @@ export function createWorldState() {
     vx: 0,
     vy: 0,
     speed: 18 + Math.random() * 10,
-    talkCooldownUntil: 0
+    talkCooldownUntil: 0,
+    holdUntil: 0,
+    playerNearby: false
   }));
 
   return {
     startedAt: Date.now(),
+    dayNumber: 1,
     timeMinutes: 8 * 60,
     weather: "clear",
     rumorOfTheDay: "A hidden lantern was seen near the forest shrine.",
+    dailyTownLog: [],
+    yesterdayTownLog: [],
     npcs,
     players: new Map(),
     farms: new Map()
@@ -190,7 +198,23 @@ export function createWorldState() {
 }
 
 export function tickClock(state, deltaMinutes = 8) {
-  state.timeMinutes = (state.timeMinutes + deltaMinutes) % (24 * 60);
+  const totalMinutes = 24 * 60;
+  const prev = ((state.timeMinutes % totalMinutes) + totalMinutes) % totalMinutes;
+  const delta = Math.max(0, Number(deltaMinutes) || 0);
+  const rawNext = prev + delta;
+  state.timeMinutes = rawNext % totalMinutes;
+
+  const prevBucket = Math.floor((prev - DAY_BOUNDARY_MINUTES) / totalMinutes);
+  const nextBucket = Math.floor((rawNext - DAY_BOUNDARY_MINUTES) / totalMinutes);
+  const dayTransitions = Math.max(0, nextBucket - prevBucket);
+  const dayChanged = dayTransitions > 0;
+
+  if (dayChanged) {
+    state.dayNumber += dayTransitions;
+    state.yesterdayTownLog = state.dailyTownLog.slice(-24);
+    state.dailyTownLog = [];
+  }
+  return { dayChanged, dayTransitions };
 }
 
 export function timeLabel(minutes) {
@@ -209,7 +233,24 @@ function pickWanderTarget(area) {
 }
 
 export function tickNpcMovement(state, dtSeconds = 1) {
+  const awakePlayers = [...state.players.values()].filter((p) => !p.sleeping);
+  const now = Date.now();
+
   for (const npc of state.npcs) {
+    const nearPlayer = awakePlayers.some(
+      (player) => Math.hypot(npc.x - player.x, npc.y - player.y) <= NPC_PLAYER_HOLD_DISTANCE
+    );
+    if (nearPlayer && !npc.playerNearby) {
+      npc.holdUntil = now + NPC_PLAYER_HOLD_MS;
+    }
+    npc.playerNearby = nearPlayer;
+
+    if (now < npc.holdUntil) {
+      npc.vx = 0;
+      npc.vy = 0;
+      continue;
+    }
+
     if (!npc.target || Math.random() < 0.02) {
       const area = AREAS.find((a) => a.name === npc.area) || findArea(npc.x, npc.y);
       npc.target = pickWanderTarget(area);
@@ -237,6 +278,7 @@ export function snapshotWorld(state, socketId = null) {
   const farm = socketId ? state.farms.get(socketId) || null : null;
 
   return {
+    dayNumber: state.dayNumber,
     timeMinutes: state.timeMinutes,
     timeLabel: timeLabel(state.timeMinutes),
     weather: state.weather,
@@ -277,6 +319,15 @@ export function snapshotWorld(state, socketId = null) {
         }
       : null
   };
+}
+
+export function pushTownEvent(state, entry) {
+  const text = String(entry || "").trim();
+  if (!text) return;
+  state.dailyTownLog.push(text);
+  if (state.dailyTownLog.length > 80) {
+    state.dailyTownLog = state.dailyTownLog.slice(-80);
+  }
 }
 
 export function findNearbyNpcPairs(npcs, maxDistance = 150) {

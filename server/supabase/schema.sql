@@ -1,3 +1,13 @@
+create table if not exists public.players (
+  id text primary key,
+  username text not null unique,
+  gender text not null default 'unspecified',
+  password_salt text not null,
+  password_hash text not null,
+  created_at timestamptz not null default now(),
+  last_login_at timestamptz
+);
+
 create table if not exists public.memories (
   id bigserial primary key,
   npc_id text not null,

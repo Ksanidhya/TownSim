@@ -7,17 +7,87 @@ const WORLD_WIDTH = 1600;
 const WORLD_HEIGHT = 1200;
 const TILE = 32;
 const DIALOGUE_BUBBLE_MS = 5000;
-const PLAYER_ID_KEY = "townsim_player_id";
-const PLAYER_NAME_KEY = "townsim_player_name";
-const PLAYER_GENDER_KEY = "townsim_player_gender";
-let ACTIVE_PROFILE = { name: "Traveler", gender: "unspecified" };
+let ACTIVE_PROFILE = { playerId: "", name: "Traveler", gender: "unspecified" };
 
-function getOrCreatePlayerId() {
-  const existing = localStorage.getItem(PLAYER_ID_KEY);
-  if (existing) return existing;
-  const id = `player_${crypto.randomUUID()}`;
-  localStorage.setItem(PLAYER_ID_KEY, id);
-  return id;
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function mixColor(a, b, t) {
+  const ta = clamp01(t);
+  const ar = (a >> 16) & 0xff;
+  const ag = (a >> 8) & 0xff;
+  const ab = a & 0xff;
+  const br = (b >> 16) & 0xff;
+  const bg = (b >> 8) & 0xff;
+  const bb = b & 0xff;
+  const r = Math.round(lerp(ar, br, ta));
+  const g = Math.round(lerp(ag, bg, ta));
+  const b2 = Math.round(lerp(ab, bb, ta));
+  return (r << 16) | (g << 8) | b2;
+}
+
+function getDaylightProfile(rawMinutes) {
+  const total = 24 * 60;
+  const minutes = ((Number(rawMinutes) || 0) % total + total) % total;
+  const dawnStart = 5 * 60;
+  const dayStart = 7 * 60;
+  const duskStart = 16 * 60;
+  const nightStart = 20 * 60;
+  const colors = {
+    daySky: 0x6fb0d1,
+    dawnSky: 0xc28665,
+    duskSky: 0x7f5f75,
+    nightSky: 0x0f1828
+  };
+
+  if (minutes >= dawnStart && minutes < dayStart) {
+    const t = (minutes - dawnStart) / (dayStart - dawnStart);
+    return {
+      phase: "dawn",
+      cameraBg: mixColor(colors.nightSky, colors.daySky, t * 0.65),
+      overlayColor: mixColor(0x0b1020, 0x2f1d08, t),
+      overlayAlpha: lerp(0.38, 0.08, t)
+    };
+  }
+
+  if (minutes >= dayStart && minutes < duskStart) {
+    return {
+      phase: "day",
+      cameraBg: colors.daySky,
+      overlayColor: 0xffffff,
+      overlayAlpha: 0
+    };
+  }
+
+  if (minutes >= duskStart && minutes < nightStart) {
+    const t = (minutes - duskStart) / (nightStart - duskStart);
+    return {
+      phase: "dusk",
+      cameraBg: mixColor(colors.daySky, colors.nightSky, t * 0.8),
+      overlayColor: mixColor(0x5b2c08, 0x0b1020, t),
+      overlayAlpha: lerp(0.05, 0.34, t)
+    };
+  }
+
+  return {
+    phase: "night",
+    cameraBg: colors.nightSky,
+    overlayColor: 0x0b1020,
+    overlayAlpha: 0.42
+  };
+}
+
+function getClockIcon(minutes, dayNumber = 1) {
+  const phase = getDaylightProfile(minutes).phase;
+  if (phase === "dawn") return "🌅";
+  if (phase === "day") return dayNumber % 2 === 0 ? "🌞" : "☀";
+  if (phase === "dusk") return "🌇";
+  return dayNumber % 2 === 0 ? "🌜" : "🌙";
 }
 
 function normalizeGender(value) {
@@ -28,46 +98,86 @@ function normalizeGender(value) {
   return "unspecified";
 }
 
-function getStoredProfile() {
-  const name = (localStorage.getItem(PLAYER_NAME_KEY) || "").trim().slice(0, 24);
-  const gender = normalizeGender(localStorage.getItem(PLAYER_GENDER_KEY));
-  if (!name) return null;
-  return { name, gender };
-}
-
-function saveProfile(profile) {
-  localStorage.setItem(PLAYER_NAME_KEY, profile.name);
-  localStorage.setItem(PLAYER_GENDER_KEY, profile.gender);
+async function submitAuth(payload, mode) {
+  const endpoint = mode === "login" ? "/auth/login" : "/auth/register";
+  const response = await fetch(`${SERVER_URL}${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data?.ok || !data?.profile) {
+    throw new Error(data?.error || "Authentication failed.");
+  }
+  return {
+    playerId: String(data.profile.playerId || "").trim(),
+    name: String(data.profile.name || "").trim().slice(0, 24),
+    gender: normalizeGender(data.profile.gender)
+  };
 }
 
 function collectProfile() {
   const startScreen = document.getElementById("start-screen");
   const form = document.getElementById("start-form");
+  const modeInput = document.getElementById("auth-mode");
   const nameInput = document.getElementById("player-name");
+  const passwordInput = document.getElementById("player-password");
+  const genderLabel = document.getElementById("player-gender-label");
   const genderInput = document.getElementById("player-gender");
-  const stored = getStoredProfile();
-
-  if (stored) {
-    startScreen.classList.add("hidden");
-    return Promise.resolve(stored);
-  }
+  const submitButton = document.getElementById("start-submit");
+  const errorEl = document.getElementById("start-error");
 
   return new Promise((resolve) => {
+    const syncModeUi = () => {
+      const isLoad = modeInput.value === "login";
+      genderInput.style.display = isLoad ? "none" : "";
+      genderLabel.style.display = isLoad ? "none" : "";
+      submitButton.textContent = isLoad ? "Load Game" : "Create & Start";
+      errorEl.textContent = "";
+    };
+    modeInput.addEventListener("change", syncModeUi);
+    syncModeUi();
+
     form.addEventListener(
       "submit",
-      (evt) => {
+      async (evt) => {
         evt.preventDefault();
-        const name = String(nameInput.value || "").trim().slice(0, 24);
-        if (!name) return;
-        const profile = {
-          name,
-          gender: normalizeGender(genderInput.value)
-        };
-        saveProfile(profile);
-        startScreen.classList.add("hidden");
-        resolve(profile);
+        errorEl.textContent = "";
+
+        const username = String(nameInput.value || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9_]/g, "")
+          .slice(0, 24);
+        const password = String(passwordInput.value || "");
+        if (!username || password.length < 4) {
+          errorEl.textContent = "Enter valid username and password (min 4 chars).";
+          return;
+        }
+
+        try {
+          submitButton.disabled = true;
+          const profile = await submitAuth(
+            {
+              username,
+              password,
+              gender: normalizeGender(genderInput.value)
+            },
+            modeInput.value
+          );
+          if (!profile.playerId || !profile.name) {
+            errorEl.textContent = "Invalid profile data from server.";
+            return;
+          }
+          startScreen.classList.add("hidden");
+          resolve(profile);
+        } catch (err) {
+          errorEl.textContent = err.message || "Failed to authenticate.";
+        } finally {
+          submitButton.disabled = false;
+        }
       },
-      { once: true }
+      { once: false }
     );
   });
 }
@@ -94,6 +204,11 @@ class TownScene extends Phaser.Scene {
     this.isDialogueHardLocked = false;
     this.activeDialogueNpcId = null;
     this.activeDialogueNpcName = "";
+    this.isReadingNews = false;
+    this.lightOverlay = null;
+    this.lastTimePhase = "";
+    this.lastWorldTimeMinutes = null;
+    this.sleepSkipHideTimer = null;
   }
 
   init(data) {
@@ -104,7 +219,7 @@ class TownScene extends Phaser.Scene {
     this.socket = io(SERVER_URL, {
       transports: ["websocket"],
       auth: {
-        playerId: getOrCreatePlayerId(),
+        playerId: this.playerProfile.playerId,
         playerName: this.playerProfile.name,
         gender: this.playerProfile.gender
       }
@@ -114,6 +229,8 @@ class TownScene extends Phaser.Scene {
     this.physics.world.setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
     this.createTileTextures();
     this.drawMap();
+    this.createLightingLayer();
+    this.applyDayNightVisuals({ timeMinutes: 8 * 60 });
 
     this.player = this.add.rectangle(680, 220, 20, 20, 0xf6e27f);
     this.physics.add.existing(this.player);
@@ -134,6 +251,12 @@ class TownScene extends Phaser.Scene {
     this.setupFarmControls();
     this.setupDialogueKeyboardControls();
     this.updateChatTarget();
+  }
+
+  createLightingLayer() {
+    this.lightOverlay = this.add.rectangle(0, 0, WORLD_WIDTH, WORLD_HEIGHT, 0x0b1020, 0.25);
+    this.lightOverlay.setOrigin(0, 0);
+    this.lightOverlay.setDepth(80);
   }
 
   createTileTextures() {
@@ -251,6 +374,7 @@ class TownScene extends Phaser.Scene {
     this.socket.on("world_snapshot", (world) => this.applyWorld(world));
     this.socket.on("world_tick", (world) => this.applyWorld(world));
     this.socket.on("dialogue_event", (evt) => this.addDialogue(evt));
+    this.socket.on("morning_news", (news) => this.showMorningNews(news));
     this.socket.on("dialogue_waiting_reply", (evt) => {
       this.isInDialogue = true;
       this.isDialogueHardLocked = false;
@@ -335,12 +459,53 @@ class TownScene extends Phaser.Scene {
 
     this.input.keyboard.on("keydown-SPACE", continueDialogue);
     this.input.keyboard.on("keydown-ENTER", continueDialogue);
+
+    const closeNews = () => {
+      if (!this.isReadingNews) return;
+      this.hideMorningNews();
+    };
+    this.input.keyboard.on("keydown-SPACE", closeNews);
+    this.input.keyboard.on("keydown-ENTER", closeNews);
+  }
+
+  showMorningNews(news) {
+    const popup = document.getElementById("news-popup");
+    const title = document.getElementById("news-title");
+    const text = document.getElementById("news-text");
+    title.textContent = news?.title || "Morning Ledger";
+    text.textContent = news?.text || "No updates today.";
+    popup.classList.remove("hidden");
+    this.isReadingNews = true;
+
+    if (!popup.dataset.boundClose) {
+      const close = () => this.hideMorningNews();
+      popup.addEventListener("click", close);
+      popup.addEventListener("keydown", (evt) => {
+        if (evt.key === "Enter" || evt.key === " ") {
+          evt.preventDefault();
+          close();
+        }
+      });
+      popup.dataset.boundClose = "1";
+    }
+    popup.focus();
+  }
+
+  hideMorningNews() {
+    const popup = document.getElementById("news-popup");
+    popup.classList.add("hidden");
+    this.isReadingNews = false;
   }
 
   applyWorld(world) {
-    document.getElementById("clock").textContent = world.timeLabel;
+    this.maybeShowSleepSkip(world);
+    document.getElementById("clock").textContent = `${world.timeLabel} ${getClockIcon(
+      world.timeMinutes,
+      world.dayNumber
+    )}`;
     document.getElementById("weather").textContent = world.weather;
     document.getElementById("rumor").textContent = `Rumor: ${world.rumorOfTheDay}`;
+    this.applyDayNightVisuals(world);
 
     if (world.you?.name) {
       this.playerProfile.name = world.you.name;
@@ -397,6 +562,44 @@ class TownScene extends Phaser.Scene {
       sprite.body.destroy();
       sprite.label.destroy();
       this.npcSprites.delete(id);
+    }
+  }
+
+  maybeShowSleepSkip(world) {
+    if (!world || !Number.isFinite(world.timeMinutes)) return;
+    const previous = this.lastWorldTimeMinutes;
+    this.lastWorldTimeMinutes = world.timeMinutes;
+    if (!Number.isFinite(previous)) return;
+
+    const total = 24 * 60;
+    const delta = (world.timeMinutes - previous + total) % total;
+    const skippedToMorning =
+      previous >= 2 * 60 && previous < 6 * 60 && world.timeMinutes === 6 * 60 && delta >= 120;
+    if (!skippedToMorning) return;
+
+    const overlay = document.getElementById("sleep-skip");
+    if (!overlay) return;
+    overlay.classList.remove("hidden");
+    if (this.sleepSkipHideTimer) {
+      clearTimeout(this.sleepSkipHideTimer);
+    }
+    this.sleepSkipHideTimer = setTimeout(() => {
+      overlay.classList.add("hidden");
+      this.sleepSkipHideTimer = null;
+    }, 1800);
+  }
+
+  applyDayNightVisuals(world) {
+    if (!world || !Number.isFinite(world.timeMinutes)) return;
+    const profile = getDaylightProfile(world.timeMinutes);
+    this.cameras.main.setBackgroundColor(profile.cameraBg);
+    if (this.lightOverlay) {
+      this.lightOverlay.setFillStyle(profile.overlayColor, profile.overlayAlpha);
+    }
+
+    if (this.lastTimePhase !== profile.phase) {
+      document.body.dataset.timePhase = profile.phase;
+      this.lastTimePhase = profile.phase;
     }
   }
 
@@ -496,11 +699,10 @@ class TownScene extends Phaser.Scene {
   }
 
   addDialogue(evt) {
-    const existing = this.bubbles.get(evt.speakerId);
-    if (existing) {
-      existing.text.destroy();
-      this.bubbles.delete(evt.speakerId);
+    for (const bubble of this.bubbles.values()) {
+      bubble.text.destroy();
     }
+    this.bubbles.clear();
 
     let bubbleText = evt.text;
     if (
@@ -585,7 +787,7 @@ class TownScene extends Phaser.Scene {
   }
 
   updateMovement() {
-    if (this.isSleeping || this.isDialogueHardLocked || this.isTypingInChat()) {
+    if (this.isSleeping || this.isDialogueHardLocked || this.isReadingNews || this.isTypingInChat()) {
       this.player.body.setVelocity(0, 0);
       return;
     }

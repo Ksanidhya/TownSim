@@ -28,6 +28,16 @@ export function initDb() {
 
 export async function ensureSchema(db) {
   await db.query(`
+    CREATE TABLE IF NOT EXISTS players (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      gender TEXT NOT NULL DEFAULT 'unspecified',
+      password_salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_login_at TIMESTAMPTZ
+    );
+
     CREATE TABLE IF NOT EXISTS memories (
       id BIGSERIAL PRIMARY KEY,
       npc_id TEXT NOT NULL,
@@ -48,6 +58,42 @@ export async function ensureSchema(db) {
       PRIMARY KEY (npc_id, player_id)
     );
   `);
+}
+
+export async function createPlayerAccount(db, account) {
+  const result = await db.query(
+    `
+      INSERT INTO players (id, username, gender, password_salt, password_hash, last_login_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+      RETURNING id, username, gender
+    `,
+    [account.id, account.username, account.gender, account.passwordSalt, account.passwordHash]
+  );
+  return result.rows[0];
+}
+
+export async function getPlayerByUsername(db, username) {
+  const result = await db.query(
+    `
+      SELECT id, username, gender, password_salt, password_hash
+      FROM players
+      WHERE username = $1
+      LIMIT 1
+    `,
+    [username]
+  );
+  return result.rows[0] || null;
+}
+
+export async function touchPlayerLogin(db, id) {
+  await db.query(
+    `
+      UPDATE players
+      SET last_login_at = NOW()
+      WHERE id = $1
+    `,
+    [id]
+  );
 }
 
 export async function writeMemory(db, memory) {

@@ -2,12 +2,16 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import http from "node:http";
+import crypto from "node:crypto";
 import { Server } from "socket.io";
 import {
+  createPlayerAccount,
   ensureSchema,
+  getPlayerByUsername,
   initDb,
   getRecentMemories,
   hasNpcIntroducedToPlayer,
+  touchPlayerLogin,
   upsertRelationshipDelta,
   writeMemory
 } from "./db.js";
@@ -17,6 +21,7 @@ import {
   createPlayerFarmIfMissing,
   createWorldState,
   findNearbyNpcPairs,
+  pushTownEvent,
   removePlayerFarm,
   snapshotWorld,
   tickClock,
@@ -49,9 +54,43 @@ const DIALOGUE_CHUNK_THRESHOLD_WORDS = 16;
 const NPC_NPC_MIN_TURNS = 2;
 const NPC_NPC_MAX_TURNS = 3;
 const NPC_NPC_TURN_DELAY_MS = 5000;
+const OVERNIGHT_SKIP_START_MINUTES = 2 * 60;
+const OVERNIGHT_SKIP_END_MINUTES = 6 * 60;
 let lastAutoDialogueAt = 0;
 let tickCount = 0;
 let npcConversationInProgress = false;
+let npcConversationCancelRequested = false;
+
+function normalizeUsername(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "")
+    .slice(0, 24);
+}
+
+function normalizeGender(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "male" || normalized === "female" || normalized === "non-binary") {
+    return normalized;
+  }
+  return "unspecified";
+}
+
+function hashPassword(password, salt) {
+  return crypto.scryptSync(password, salt, 64).toString("hex");
+}
+
+function safeEqualHex(a, b) {
+  try {
+    const ba = Buffer.from(a, "hex");
+    const bb = Buffer.from(b, "hex");
+    if (ba.length !== bb.length) return false;
+    return crypto.timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
+}
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
@@ -59,6 +98,87 @@ app.get("/health", (_req, res) => {
 
 app.get("/world", (_req, res) => {
   res.json(snapshotWorld(world));
+});
+
+app.post("/auth/register", async (req, res) => {
+  try {
+    const username = normalizeUsername(req.body?.username);
+    const password = String(req.body?.password || "");
+    const gender = normalizeGender(req.body?.gender);
+
+    if (!username || username.length < 3) {
+      res.status(400).json({ ok: false, error: "Username must be at least 3 characters." });
+      return;
+    }
+    if (password.length < 4) {
+      res.status(400).json({ ok: false, error: "Password must be at least 4 characters." });
+      return;
+    }
+
+    const existing = await getPlayerByUsername(db, username);
+    if (existing) {
+      res.status(409).json({ ok: false, error: "Username already exists." });
+      return;
+    }
+
+    const salt = crypto.randomBytes(16).toString("hex");
+    const passwordHash = hashPassword(password, salt);
+    const account = await createPlayerAccount(db, {
+      id: `player_${crypto.randomUUID()}`,
+      username,
+      gender,
+      passwordSalt: salt,
+      passwordHash
+    });
+
+    res.json({
+      ok: true,
+      profile: {
+        playerId: account.id,
+        name: account.username,
+        gender: account.gender
+      }
+    });
+  } catch (err) {
+    console.error("register error:", err.message);
+    res.status(500).json({ ok: false, error: "Failed to create account." });
+  }
+});
+
+app.post("/auth/login", async (req, res) => {
+  try {
+    const username = normalizeUsername(req.body?.username);
+    const password = String(req.body?.password || "");
+    if (!username || !password) {
+      res.status(400).json({ ok: false, error: "Username and password are required." });
+      return;
+    }
+
+    const account = await getPlayerByUsername(db, username);
+    if (!account) {
+      res.status(401).json({ ok: false, error: "Invalid credentials." });
+      return;
+    }
+
+    const computedHash = hashPassword(password, account.password_salt);
+    if (!safeEqualHex(computedHash, account.password_hash)) {
+      res.status(401).json({ ok: false, error: "Invalid credentials." });
+      return;
+    }
+
+    await touchPlayerLogin(db, account.id);
+    res.json({
+      ok: true,
+      profile: {
+        playerId: account.id,
+        name: account.username,
+        gender: account.gender || "unspecified"
+      }
+    });
+  } catch (err) {
+    console.error("login error:", err.message);
+    res.status(500).json({ ok: false, error: "Failed to load account." });
+  }
 });
 
 io.on("connection", (socket) => {
@@ -92,6 +212,8 @@ io.on("connection", (socket) => {
     dialogueChunks: [],
     dialogueEmotion: "neutral",
     waitingForPlayerReply: false,
+    waitingAnchorX: null,
+    waitingAnchorY: null,
     connectedAt: Date.now()
   });
   socket.emit("world_snapshot", snapshotWorld(world, socket.id));
@@ -108,21 +230,15 @@ io.on("connection", (socket) => {
     if (player.inDialogue && !player.waitingForPlayerReply) return;
     if (player.inDialogue && player.waitingForPlayerReply) {
       if (!moved) return;
+      const anchorX = Number.isFinite(player.waitingAnchorX) ? player.waitingAnchorX : player.x;
+      const anchorY = Number.isFinite(player.waitingAnchorY) ? player.waitingAnchorY : player.y;
+      const movedFromAnchor = Math.hypot(x - anchorX, y - anchorY);
+      if (movedFromAnchor <= 2) return;
+
       player.x = x;
       player.y = y;
-
-      const npc = world.npcs.find((n) => n.id === player.dialogueNpcId);
-      if (!npc) {
-        endPlayerDialogue(player);
-        socket.emit("dialogue_ended");
-        return;
-      }
-
-      const dist = Math.hypot(npc.x - player.x, npc.y - player.y);
-      if (dist > PLAYER_NEAR_DISTANCE) {
-        endPlayerDialogue(player);
-        socket.emit("dialogue_ended");
-      }
+      endPlayerDialogue(player);
+      socket.emit("dialogue_ended");
       return;
     }
     player.x = x;
@@ -209,9 +325,14 @@ io.on("connection", (socket) => {
           waitingForReply
         });
         player.waitingForPlayerReply = waitingForReply;
+        if (waitingForReply) {
+          player.waitingAnchorX = player.x;
+          player.waitingAnchorY = player.y;
+        }
         if (!needsContinue) {
           socket.emit("dialogue_waiting_reply", { npcId: npc.id, npcName: npc.name });
         }
+        pushTownEvent(world, `${player.name} checked in with ${npc.name} near ${npc.area}.`);
         return;
       }
 
@@ -235,14 +356,16 @@ io.on("connection", (socket) => {
     try {
       const player = world.players.get(socket.id);
       if (!player || player.sleeping) return;
-      if (!player.inDialogue && (anyPlayerInDialogue() || npcConversationInProgress)) return;
+      if (!player.inDialogue && anyPlayerInDialogue()) return;
+      if (!player.inDialogue && npcConversationInProgress) {
+        npcConversationCancelRequested = true;
+      }
       const npcId = String(payload?.npcId || "").trim();
       const npc = world.npcs.find((n) => n.id === npcId);
       if (!npc) return;
       if (player.inDialogue && player.dialogueNpcId && player.dialogueNpcId !== npc.id) return;
       const isContinuing = player.inDialogue && player.dialogueNpcId === npc.id;
-
-      if (!isContinuing && npc.talkCooldownUntil > Date.now()) return;
+      // Player-initiated taps should respond immediately.
 
       const dist = Math.hypot(npc.x - player.x, npc.y - player.y);
       if (dist > PLAYER_NEAR_DISTANCE) return;
@@ -282,6 +405,10 @@ io.on("connection", (socket) => {
         waitingForReply
       });
       player.waitingForPlayerReply = waitingForReply;
+      if (waitingForReply) {
+        player.waitingAnchorX = player.x;
+        player.waitingAnchorY = player.y;
+      }
 
       if (!needsContinue) {
         socket.emit("dialogue_waiting_reply", { npcId: npc.id, npcName: npc.name });
@@ -342,6 +469,59 @@ function introLineForNpc(npc) {
   return `Welcome. I'm ${npc.name}, the town's ${npc.role.toLowerCase()}.`;
 }
 
+function buildMorningSummary(state) {
+  const logs = state.yesterdayTownLog || [];
+  if (logs.length === 0) {
+    return "Quiet night in town. No notable incidents were reported before dawn.";
+  }
+  const picks = logs
+    .filter((line) => !/"|\bsaid|told|replied\b/i.test(line))
+    .slice(-5);
+  if (picks.length === 0) {
+    return "Quiet night in town. People kept to routine with no major incidents.";
+  }
+  return picks.map((line, idx) => `${idx + 1}. ${line}`).join("\n");
+}
+
+function runMorningReset(reason = "new_day") {
+  const summary = buildMorningSummary(world);
+  for (const [socketId, player] of world.players.entries()) {
+    const farm = world.farms.get(socketId);
+    if (farm?.home) {
+      player.x = farm.home.x;
+      player.y = farm.home.y;
+    }
+    player.sleeping = false;
+    if (player.inDialogue) {
+      endPlayerDialogue(player);
+      io.to(socketId).emit("dialogue_ended");
+    }
+
+    const reasonLine =
+      reason === "overnight_skip"
+        ? "You were escorted home at 2:00 AM and woke at 6:00 AM."
+        : "A new day begins in town.";
+    io.to(socketId).emit("morning_news", {
+      dayNumber: world.dayNumber,
+      title: `Morning Ledger - Day ${world.dayNumber}`,
+      text: `${reasonLine}\n\n${summary}`
+    });
+  }
+}
+
+function maybeSkipOvernightWindow() {
+  const inSkipWindow =
+    world.timeMinutes >= OVERNIGHT_SKIP_START_MINUTES && world.timeMinutes < OVERNIGHT_SKIP_END_MINUTES;
+  if (!inSkipWindow) return false;
+  const minutesToWake = OVERNIGHT_SKIP_END_MINUTES - world.timeMinutes;
+  const skipResult = tickClock(world, minutesToWake);
+  const dayChanged = Boolean(skipResult?.dayChanged);
+  if (dayChanged) {
+    runMorningReset("overnight_skip");
+  }
+  return dayChanged;
+}
+
 function endPlayerDialogue(player) {
   player.inDialogue = false;
   player.dialogueNpcId = null;
@@ -349,6 +529,8 @@ function endPlayerDialogue(player) {
   player.dialogueChunks = [];
   player.dialogueEmotion = "neutral";
   player.waitingForPlayerReply = false;
+  player.waitingAnchorX = null;
+  player.waitingAnchorY = null;
 }
 
 function splitDialogueToChunks(text) {
@@ -468,17 +650,22 @@ async function startPlayerDialogue({ socket, player, npc, context, topicHint }) 
     createdAt: new Date().toISOString()
   });
   await upsertRelationshipDelta(db, npc.id, player.playerId, 1);
+  pushTownEvent(world, `${npc.name} met with ${player.name} near ${npc.area}.`);
   npc.talkCooldownUntil = Date.now() + NPC_COOLDOWN_MS;
   lastAutoDialogueAt = Date.now();
 
   player.waitingForPlayerReply = waitingForReply;
+  if (waitingForReply) {
+    player.waitingAnchorX = player.x;
+    player.waitingAnchorY = player.y;
+  }
   if (!needsContinue) {
     socket.emit("dialogue_waiting_reply", { npcId: npc.id, npcName: npc.name });
   }
 }
 
 async function maybeTriggerNpcConversation() {
-  if (npcConversationInProgress) return;
+  if (npcConversationInProgress || npcConversationCancelRequested) return;
   const now = Date.now();
   const pairs = findNearbyNpcPairs(world.npcs, 110).filter(
     (pair) =>
@@ -490,6 +677,7 @@ async function maybeTriggerNpcConversation() {
   const { a, b } = pair;
   if (a.talkCooldownUntil > now || b.talkCooldownUntil > now) return;
   npcConversationInProgress = true;
+  npcConversationCancelRequested = false;
 
   let speaker = Math.random() > 0.5 ? a : b;
   let target = speaker.id === a.id ? b : a;
@@ -500,6 +688,7 @@ async function maybeTriggerNpcConversation() {
 
   try {
     for (let i = 0; i < turns; i += 1) {
+      if (npcConversationCancelRequested || anyPlayerInDialogue()) break;
       const line = await dialogueService.generateNpcLine({
         speaker,
         target,
@@ -528,10 +717,12 @@ async function maybeTriggerNpcConversation() {
         tags: `${speaker.role},${target.role}`,
         createdAt: new Date().toISOString()
       });
+      pushTownEvent(world, `${speaker.name} and ${target.name} exchanged updates near ${speaker.area}.`);
 
       if (i < turns - 1) {
         await sleep(NPC_NPC_TURN_DELAY_MS);
       }
+      if (npcConversationCancelRequested || anyPlayerInDialogue()) break;
 
       previousLine = line.line;
       const nextSpeaker = target;
@@ -539,11 +730,16 @@ async function maybeTriggerNpcConversation() {
       speaker = nextSpeaker;
     }
 
-    a.talkCooldownUntil = now + NPC_COOLDOWN_MS;
-    b.talkCooldownUntil = now + NPC_COOLDOWN_MS;
-    lastAutoDialogueAt = now;
+    if (!npcConversationCancelRequested) {
+      a.talkCooldownUntil = now + NPC_COOLDOWN_MS;
+      b.talkCooldownUntil = now + NPC_COOLDOWN_MS;
+      lastAutoDialogueAt = now;
+    } else {
+      lastAutoDialogueAt = Date.now();
+    }
   } finally {
     npcConversationInProgress = false;
+    npcConversationCancelRequested = false;
   }
 }
 
@@ -551,10 +747,20 @@ setInterval(async () => {
   tickCount += 1;
   const dialogueActive = anyPlayerInDialogue();
   const simulationPaused = dialogueActive || npcConversationInProgress;
+  let dayChanged = false;
+  let skippedNight = false;
   if (!simulationPaused) {
-    tickClock(world, 5);
+    const clockResult = tickClock(world, 5);
+    dayChanged = Boolean(clockResult?.dayChanged);
+    if (dayChanged) {
+      runMorningReset("new_day");
+    }
     tickNpcMovement(world, 1);
     tickFarmGrowth(world, 5);
+    skippedNight = maybeSkipOvernightWindow();
+    if (dayChanged || skippedNight) {
+      emitWorldToAllPlayers("world_tick");
+    }
   }
   const awakePlayers = getAwakePlayers();
   const shouldSync = awakePlayers.length > 0 || tickCount % SLEEP_SYNC_INTERVAL_TICKS === 0;
@@ -565,6 +771,8 @@ setInterval(async () => {
   try {
     if (
       !simulationPaused &&
+      !dayChanged &&
+      !skippedNight &&
       awakePlayers.length > 0 &&
       Date.now() - lastAutoDialogueAt >= AUTO_DIALOGUE_MIN_INTERVAL_MS
     ) {

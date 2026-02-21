@@ -4,6 +4,7 @@ Stardew-inspired top-down pixel town prototype with:
 
 - free player movement
 - home farm gameplay (sowing, watering, harvesting)
+- account-based profiles (create game / load game with password)
 - autonomous NPC movement
 - NPC-to-NPC and NPC-to-player proximity conversations
 - OpenAI-backed dialogue (with offline fallback lines)
@@ -54,9 +55,9 @@ npm run dev
 
 ## Controls
 
-- Move: `WASD` or arrow keys
+- Move: `Arrow keys`
 - NPCs talk automatically on proximity
-- At launch, enter your player name and gender
+- At launch, choose `Create New Game` (username + password + gender) or `Load Game` (username + password)
 - Farming: go to your home field in Housing, click a plot, then use `Sow`, `Water`, `Harvest` in HUD
 
 ## Notes

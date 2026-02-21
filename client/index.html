@@ -9,19 +9,28 @@
     <div id="start-screen">
       <form id="start-form">
         <h1>Welcome Home</h1>
-        <p>Set your farmer profile to begin.</p>
-        <label for="player-name">Name</label>
-        <input id="player-name" type="text" maxlength="24" required placeholder="Your name" />
-        <label for="player-gender">Gender</label>
-        <select id="player-gender" required>
+        <p>Create a new game or load your profile.</p>
+        <label for="auth-mode">Mode</label>
+        <select id="auth-mode" required>
+          <option value="register">Create New Game</option>
+          <option value="login">Load Game</option>
+        </select>
+        <label for="player-name">Username</label>
+        <input id="player-name" type="text" maxlength="24" required placeholder="username" />
+        <label for="player-password">Password</label>
+        <input id="player-password" type="password" minlength="4" maxlength="72" required placeholder="password" />
+        <label for="player-gender" id="player-gender-label">Gender</label>
+        <select id="player-gender">
           <option value="female">Female</option>
           <option value="male">Male</option>
           <option value="non-binary">Non-binary</option>
         </select>
-        <button type="submit">Start Game</button>
+        <div id="start-error" aria-live="polite"></div>
+        <button id="start-submit" type="submit">Create & Start</button>
       </form>
     </div>
     <div id="game-root"></div>
+    <div id="sleep-skip" class="hidden" aria-live="polite">Night passes... you wake at 6:00 AM.</div>
     <aside id="hud">
       <div class="chip" id="player-profile">Player: Traveler (unspecified)</div>
       <div class="chip" id="clock">8:00 AM</div>
@@ -33,6 +42,11 @@
         <button id="sleep-toggle" type="button">Sleep: Off</button>
       </div>
       <div class="chip" id="chat-target">Talking to: nobody</div>
+      <div id="news-popup" class="hidden" role="dialog" aria-live="polite" tabindex="0">
+        <div id="news-title"></div>
+        <div id="news-text"></div>
+        <div id="news-hint">Click or press Enter/Space to close</div>
+      </div>
       <div id="farm-panel">
         <div id="farm-title">Home Farm</div>
         <div class="farm-chip" id="farm-selected">Plot: none</div>

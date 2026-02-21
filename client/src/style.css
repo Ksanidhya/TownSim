@@ -1,9 +1,12 @@
 :root {
-  --bg: #172521;
-  --panel: rgba(10, 21, 18, 0.8);
-  --chip: #274a3f;
+  --bg-top: #6ea5b9;
+  --bg: #2a6558;
+  --panel: rgba(14, 32, 28, 0.84);
+  --chip: #2f5d4f;
   --text: #e6f3ea;
   --accent: #f5d76e;
+  --screen-glow: rgba(122, 188, 197, 0.42);
+  --screen-deep: rgba(10, 17, 15, 0.9);
 }
 
 * {
@@ -13,14 +16,72 @@
 body {
   margin: 0;
   overflow: hidden;
-  background: radial-gradient(circle at 20% 0%, #2a483f 0%, var(--bg) 55%);
+  background: radial-gradient(circle at 20% 0%, var(--bg-top) 0%, var(--bg) 55%);
   color: var(--text);
   font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+  transition: background 450ms ease, color 450ms ease;
+}
+
+body[data-time-phase="dawn"] {
+  --bg-top: #d08e67;
+  --bg: #4d4a4f;
+  --panel: rgba(29, 24, 25, 0.84);
+  --chip: #634846;
+  --screen-glow: rgba(205, 126, 86, 0.45);
+  --screen-deep: rgba(21, 14, 14, 0.9);
+}
+
+body[data-time-phase="day"] {
+  --bg-top: #78bdd8;
+  --bg: #2f7161;
+  --panel: rgba(18, 40, 34, 0.84);
+  --chip: #3a6d5d;
+  --screen-glow: rgba(144, 201, 214, 0.44);
+  --screen-deep: rgba(10, 17, 15, 0.88);
+}
+
+body[data-time-phase="dusk"] {
+  --bg-top: #8e6579;
+  --bg: #2f3040;
+  --panel: rgba(24, 23, 32, 0.88);
+  --chip: #4a4459;
+  --screen-glow: rgba(132, 88, 112, 0.42);
+  --screen-deep: rgba(11, 13, 21, 0.92);
+}
+
+body[data-time-phase="night"] {
+  --bg-top: #233047;
+  --bg: #121926;
+  --panel: rgba(8, 14, 24, 0.9);
+  --chip: #25354d;
+  --screen-glow: rgba(54, 75, 114, 0.38);
+  --screen-deep: rgba(8, 11, 19, 0.95);
 }
 
 #game-root canvas {
   image-rendering: pixelated;
   image-rendering: crisp-edges;
+}
+
+#sleep-skip {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  text-align: center;
+  font-size: clamp(16px, 2.4vw, 28px);
+  letter-spacing: 0.03em;
+  color: #f7f2d8;
+  background: rgba(7, 10, 18, 0.74);
+  backdrop-filter: blur(2px);
+  transition: opacity 240ms ease;
+}
+
+#sleep-skip.hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 #start-screen {
@@ -29,7 +90,7 @@ body {
   z-index: 150;
   display: grid;
   place-items: center;
-  background: radial-gradient(circle at 50% 20%, rgba(68, 112, 95, 0.45) 0%, rgba(10, 17, 15, 0.95) 65%);
+  background: radial-gradient(circle at 50% 20%, var(--screen-glow) 0%, var(--screen-deep) 65%);
 }
 
 #start-screen.hidden {
@@ -70,6 +131,12 @@ body {
 #start-form button {
   background: #456b5a;
   cursor: pointer;
+}
+
+#start-error {
+  min-height: 16px;
+  font-size: 12px;
+  color: #ffd2a6;
 }
 
 #hud {
@@ -124,7 +191,7 @@ body {
   padding: 10px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(9, 18, 16, 0.9);
+  background: var(--panel);
   pointer-events: auto;
 }
 
@@ -170,6 +237,38 @@ body {
   font-size: 12px;
   color: #f6e6a5;
   min-height: 16px;
+}
+
+#news-popup {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(11, 20, 17, 0.95);
+  pointer-events: auto;
+  cursor: pointer;
+  white-space: pre-line;
+}
+
+#news-popup.hidden {
+  display: none;
+}
+
+#news-title {
+  font-weight: 700;
+  color: #f6e27f;
+  margin-bottom: 6px;
+}
+
+#news-text {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+#news-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  opacity: 0.75;
 }
 
 @media (max-width: 768px) {
