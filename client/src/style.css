@@ -1,0 +1,185 @@
+:root {
+  --bg: #172521;
+  --panel: rgba(10, 21, 18, 0.8);
+  --chip: #274a3f;
+  --text: #e6f3ea;
+  --accent: #f5d76e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: radial-gradient(circle at 20% 0%, #2a483f 0%, var(--bg) 55%);
+  color: var(--text);
+  font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+}
+
+#game-root canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+#start-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(circle at 50% 20%, rgba(68, 112, 95, 0.45) 0%, rgba(10, 17, 15, 0.95) 65%);
+}
+
+#start-screen.hidden {
+  display: none;
+}
+
+#start-form {
+  width: min(360px, calc(100vw - 24px));
+  padding: 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(8, 18, 15, 0.95);
+  display: grid;
+  gap: 8px;
+}
+
+#start-form h1 {
+  margin: 0;
+  font-size: 22px;
+  color: #f6e6a5;
+}
+
+#start-form p {
+  margin: 0 0 6px 0;
+  opacity: 0.9;
+}
+
+#start-form input,
+#start-form select,
+#start-form button {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: rgba(19, 41, 35, 0.88);
+  color: var(--text);
+}
+
+#start-form button {
+  background: #456b5a;
+  cursor: pointer;
+}
+
+#hud {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  width: min(520px, calc(100vw - 20px));
+  pointer-events: none;
+}
+
+.chip {
+  display: inline-block;
+  margin: 0 8px 8px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--chip);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.rumor {
+  max-width: 100%;
+}
+
+#chat-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  pointer-events: auto;
+}
+
+#chat-input {
+  flex: 1;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(6, 16, 14, 0.88);
+  color: var(--text);
+}
+
+#chat-send,
+#sleep-toggle {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #36584b;
+  color: var(--text);
+  cursor: pointer;
+}
+
+#farm-panel {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(9, 18, 16, 0.9);
+  pointer-events: auto;
+}
+
+#farm-title {
+  font-weight: 700;
+  color: #f6e27f;
+  margin-bottom: 8px;
+}
+
+.farm-chip {
+  font-size: 12px;
+  margin-bottom: 4px;
+  opacity: 0.95;
+}
+
+#farm-controls {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+#farm-controls select,
+#farm-controls button {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: #2a4339;
+  color: var(--text);
+}
+
+#farm-controls button {
+  cursor: pointer;
+}
+
+#farm-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+#farm-feedback {
+  margin-top: 7px;
+  font-size: 12px;
+  color: #f6e6a5;
+  min-height: 16px;
+}
+
+@media (max-width: 768px) {
+  #hud {
+    width: calc(100vw - 16px);
+    left: 8px;
+    top: 8px;
+  }
+
+  #farm-controls {
+    flex-wrap: wrap;
+  }
+}

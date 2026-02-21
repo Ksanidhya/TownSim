@@ -1,0 +1,19 @@
+{
+  "name": "town-sim-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "app1-town-sim": "file:..",
+    "phaser": "^3.87.0",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "vite": "^6.1.1"
+  }
+}

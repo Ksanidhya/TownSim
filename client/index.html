@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Town Sim</title>
+  </head>
+  <body>
+    <div id="start-screen">
+      <form id="start-form">
+        <h1>Welcome Home</h1>
+        <p>Set your farmer profile to begin.</p>
+        <label for="player-name">Name</label>
+        <input id="player-name" type="text" maxlength="24" required placeholder="Your name" />
+        <label for="player-gender">Gender</label>
+        <select id="player-gender" required>
+          <option value="female">Female</option>
+          <option value="male">Male</option>
+          <option value="non-binary">Non-binary</option>
+        </select>
+        <button type="submit">Start Game</button>
+      </form>
+    </div>
+    <div id="game-root"></div>
+    <aside id="hud">
+      <div class="chip" id="player-profile">Player: Traveler (unspecified)</div>
+      <div class="chip" id="clock">8:00 AM</div>
+      <div class="chip" id="weather">clear</div>
+      <div class="chip rumor" id="rumor">Rumor: ...</div>
+      <div id="chat-controls">
+        <input id="chat-input" type="text" maxlength="240" placeholder="Say something..." />
+        <button id="chat-send" type="button">Send</button>
+        <button id="sleep-toggle" type="button">Sleep: Off</button>
+      </div>
+      <div class="chip" id="chat-target">Talking to: nobody</div>
+      <div id="farm-panel">
+        <div id="farm-title">Home Farm</div>
+        <div class="farm-chip" id="farm-selected">Plot: none</div>
+        <div class="farm-chip" id="farm-coins">Coins: 0</div>
+        <div class="farm-chip" id="farm-inventory">Inventory: -</div>
+        <div id="farm-controls">
+          <select id="farm-crop">
+            <option value="turnip">Turnip</option>
+            <option value="carrot">Carrot</option>
+            <option value="pumpkin">Pumpkin</option>
+          </select>
+          <button id="farm-sow" type="button">Sow</button>
+          <button id="farm-water" type="button">Water</button>
+          <button id="farm-harvest" type="button">Harvest</button>
+        </div>
+        <div id="farm-hint">Move near your home field, click a plot, then use actions.</div>
+        <div id="farm-feedback">No farm updates yet.</div>
+      </div>
+    </aside>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
