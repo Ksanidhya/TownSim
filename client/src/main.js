@@ -504,7 +504,11 @@ class TownScene extends Phaser.Scene {
       world.dayNumber
     )}`;
     document.getElementById("weather").textContent = world.weather;
-    document.getElementById("rumor").textContent = `Rumor: ${world.rumorOfTheDay}`;
+    const missionLabel = world.mission?.completed
+      ? "Mission: All complete"
+      : `Mission ${world.mission?.step || 1}/${world.mission?.total || 1}: ${world.mission?.title || "Explore town"}`;
+    const missionProgress = world.mission?.progress ? ` (${world.mission.progress})` : "";
+    document.getElementById("mission").textContent = `${missionLabel}${missionProgress}`;
     this.applyDayNightVisuals(world);
 
     if (world.you?.name) {

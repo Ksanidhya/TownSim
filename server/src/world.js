@@ -12,12 +12,196 @@ const FARM_GAP = 42;
 const NPC_PLAYER_HOLD_DISTANCE = 70;
 const NPC_PLAYER_HOLD_MS = 5000;
 const DAY_BOUNDARY_MINUTES = 6 * 60;
+const FOREST_SHRINE = { x: 250, y: 930, radius: 90 };
 
 export const CROP_CONFIG = {
   turnip: { label: "Turnip", growMinutes: 180, seedCost: 6, minYield: 1, maxYield: 2, sellPrice: 8 },
   carrot: { label: "Carrot", growMinutes: 240, seedCost: 8, minYield: 1, maxYield: 3, sellPrice: 10 },
   pumpkin: { label: "Pumpkin", growMinutes: 360, seedCost: 12, minYield: 1, maxYield: 2, sellPrice: 18 }
 };
+
+export const MISSION_CHAIN = [
+  {
+    id: "hidden_lantern",
+    title: "Hidden Lantern",
+    description: "Search the forest shrine and find the rumored lantern."
+  },
+  {
+    id: "meet_guard",
+    title: "Meet The Guard",
+    description: "Talk to Rook in Town Square."
+  },
+  {
+    id: "first_harvest",
+    title: "First Harvest",
+    description: "Harvest 2 crops from your home field.",
+    targetCount: 2
+  },
+  {
+    id: "know_the_town",
+    title: "Know The Town",
+    description: "Speak to 3 different townsfolk.",
+    targetCount: 3
+  }
+];
+
+function clampMissionIndex(index) {
+  const max = MISSION_CHAIN.length;
+  return Math.max(0, Math.min(max, Number(index) || 0));
+}
+
+export function createMissionProgress() {
+  return {
+    index: 0,
+    harvestCount: 0,
+    spokenNpcIds: []
+  };
+}
+
+export function ensurePlayerMissionProgress(player) {
+  if (!player.missionProgress) {
+    player.missionProgress = createMissionProgress();
+  }
+  player.missionProgress.index = clampMissionIndex(player.missionProgress.index);
+  if (!Array.isArray(player.missionProgress.spokenNpcIds)) {
+    player.missionProgress.spokenNpcIds = [];
+  }
+  if (!Number.isFinite(player.missionProgress.harvestCount)) {
+    player.missionProgress.harvestCount = 0;
+  }
+  return player.missionProgress;
+}
+
+function currentMission(player) {
+  const progress = ensurePlayerMissionProgress(player);
+  if (progress.index >= MISSION_CHAIN.length) return null;
+  return MISSION_CHAIN[progress.index];
+}
+
+function missionProgressText(player) {
+  const progress = ensurePlayerMissionProgress(player);
+  const mission = currentMission(player);
+  if (!mission) return "All missions complete.";
+
+  if (mission.id === "hidden_lantern") {
+    return "Go to the forest shrine.";
+  }
+  if (mission.id === "meet_guard") {
+    return "Find and talk to Rook.";
+  }
+  if (mission.id === "first_harvest") {
+    const done = Math.min(mission.targetCount || 2, progress.harvestCount);
+    return `Harvest progress: ${done}/${mission.targetCount || 2}.`;
+  }
+  if (mission.id === "know_the_town") {
+    const done = Math.min(mission.targetCount || 3, progress.spokenNpcIds.length);
+    return `People met: ${done}/${mission.targetCount || 3}.`;
+  }
+  return "Keep exploring town.";
+}
+
+function advanceMission(player) {
+  const progress = ensurePlayerMissionProgress(player);
+  const mission = currentMission(player);
+  if (!mission) return null;
+
+  progress.index += 1;
+  if (mission.id === "first_harvest") {
+    progress.harvestCount = 0;
+  }
+  if (mission.id === "know_the_town") {
+    progress.spokenNpcIds = [];
+  }
+  const next = currentMission(player);
+  return { completed: mission, next };
+}
+
+export function applyMissionEvent(player, event) {
+  if (!player) return { changed: false };
+  const progress = ensurePlayerMissionProgress(player);
+  const mission = currentMission(player);
+  if (!mission) return { changed: false };
+
+  if (mission.id === "hidden_lantern" && event?.type === "move") {
+    const x = Number(event?.x);
+    const y = Number(event?.y);
+    if (Number.isFinite(x) && Number.isFinite(y) && Math.hypot(x - FOREST_SHRINE.x, y - FOREST_SHRINE.y) <= FOREST_SHRINE.radius) {
+      const result = advanceMission(player);
+      return {
+        changed: true,
+        completedMission: result?.completed || null,
+        nextMission: result?.next || null
+      };
+    }
+  }
+
+  if (mission.id === "meet_guard" && event?.type === "talk_npc" && event?.npcId === "npc_guard") {
+    const result = advanceMission(player);
+    return {
+      changed: true,
+      completedMission: result?.completed || null,
+      nextMission: result?.next || null
+    };
+  }
+
+  if (mission.id === "first_harvest" && event?.type === "harvest_success") {
+    progress.harvestCount += 1;
+    const done = progress.harvestCount >= (mission.targetCount || 2);
+    if (done) {
+      const result = advanceMission(player);
+      return {
+        changed: true,
+        completedMission: result?.completed || null,
+        nextMission: result?.next || null
+      };
+    }
+    return { changed: true };
+  }
+
+  if (mission.id === "know_the_town" && event?.type === "talk_npc") {
+    const npcId = String(event?.npcId || "").trim();
+    if (!npcId) return { changed: false };
+    if (!progress.spokenNpcIds.includes(npcId)) {
+      progress.spokenNpcIds.push(npcId);
+      const done = progress.spokenNpcIds.length >= (mission.targetCount || 3);
+      if (done) {
+        const result = advanceMission(player);
+        return {
+          changed: true,
+          completedMission: result?.completed || null,
+          nextMission: result?.next || null
+        };
+      }
+      return { changed: true };
+    }
+  }
+
+  return { changed: false };
+}
+
+function missionSnapshot(player) {
+  const progress = ensurePlayerMissionProgress(player);
+  const mission = currentMission(player);
+  if (!mission) {
+    return {
+      completed: true,
+      title: "All Missions Complete",
+      description: "No active missions right now.",
+      progress: "Great work. More missions soon.",
+      step: MISSION_CHAIN.length,
+      total: MISSION_CHAIN.length
+    };
+  }
+  return {
+    id: mission.id,
+    completed: false,
+    title: mission.title,
+    description: mission.description,
+    progress: missionProgressText(player),
+    step: progress.index + 1,
+    total: MISSION_CHAIN.length
+  };
+}
 
 function createPlot(col, row) {
   const id = row * FARM_COLS + col + 1;
@@ -302,6 +486,7 @@ export function snapshotWorld(state, socketId = null) {
           y: player.y
         }
       : null,
+    mission: player ? missionSnapshot(player) : null,
     farm: farm
       ? {
           home: farm.home,

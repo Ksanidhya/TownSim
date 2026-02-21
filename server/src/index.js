@@ -17,9 +17,11 @@ import {
 } from "./db.js";
 import { DialogueService } from "./dialogue.js";
 import {
+  applyMissionEvent,
   applyFarmAction,
   createPlayerFarmIfMissing,
   createWorldState,
+  ensurePlayerMissionProgress,
   findNearbyNpcPairs,
   pushTownEvent,
   removePlayerFarm,
@@ -60,6 +62,14 @@ let lastAutoDialogueAt = 0;
 let tickCount = 0;
 let npcConversationInProgress = false;
 let npcConversationCancelRequested = false;
+const TOWN_LIFE_TOPIC_HINTS = [
+  "daily life in town",
+  "work and personal mood today",
+  "neighbors and people around town",
+  "food, chores, and routines",
+  "weather and how it affects plans",
+  "small worries and hopes"
+];
 
 function normalizeUsername(value) {
   return String(value || "")
@@ -67,6 +77,29 @@ function normalizeUsername(value) {
     .toLowerCase()
     .replace(/[^a-z0-9_]/g, "")
     .slice(0, 24);
+}
+
+function pickRandom(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return "";
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function applyMissionProgressAndNotify(socket, player, missionEvent) {
+  if (!socket || !player || !missionEvent) return false;
+  const result = applyMissionEvent(player, missionEvent);
+  if (!result?.changed) return false;
+
+  if (result.completedMission) {
+    const nextText = result.nextMission
+      ? ` Next: ${result.nextMission.title}.`
+      : " All mission steps complete.";
+    socket.emit("farm_feedback", {
+      ok: true,
+      message: `Mission complete: ${result.completedMission.title}.${nextText}`
+    });
+  }
+  emitWorldToPlayer(socket.id, "world_tick");
+  return true;
 }
 
 function normalizeGender(value) {
@@ -216,6 +249,7 @@ io.on("connection", (socket) => {
     waitingAnchorY: null,
     connectedAt: Date.now()
   });
+  ensurePlayerMissionProgress(world.players.get(socket.id));
   socket.emit("world_snapshot", snapshotWorld(world, socket.id));
 
   socket.on("player_move", (payload) => {
@@ -243,6 +277,7 @@ io.on("connection", (socket) => {
     }
     player.x = x;
     player.y = y;
+    applyMissionProgressAndNotify(socket, player, { type: "move", x, y });
   });
 
   socket.on("player_state", (payload) => {
@@ -293,7 +328,7 @@ io.on("connection", (socket) => {
           target: { id: player.playerId, name: player.name || "Traveler", role: "Visitor", traits: [] },
           worldContext: context,
           memories: await getRecentMemories(db, npc.id, 4),
-          topicHint: `reply to player message: "${text}"`
+          topicHint: `reply mostly to player message tone/topic: "${text}" (can occasionally pivot naturally)`
         });
 
         await writeMemory(db, {
@@ -369,6 +404,7 @@ io.on("connection", (socket) => {
 
       const dist = Math.hypot(npc.x - player.x, npc.y - player.y);
       if (dist > PLAYER_NEAR_DISTANCE) return;
+      applyMissionProgressAndNotify(socket, player, { type: "talk_npc", npcId: npc.id });
 
       const context = snapshotWorld(world, socket.id);
 
@@ -378,7 +414,7 @@ io.on("connection", (socket) => {
           player,
           npc,
           context,
-          topicHint: "player clicked to talk"
+          topicHint: `casual personal talk about ${pickRandom(TOWN_LIFE_TOPIC_HINTS)}`
         });
         return;
       }
@@ -440,7 +476,13 @@ io.on("connection", (socket) => {
 
     const result = applyFarmAction({ state: world, socketId: socket.id, action, plotId, cropType });
     socket.emit("farm_feedback", result);
-    socket.emit("world_tick", snapshotWorld(world, socket.id));
+    const missionChanged =
+      result?.ok && action === "harvest"
+        ? applyMissionProgressAndNotify(socket, player, { type: "harvest_success" })
+        : false;
+    if (!missionChanged) {
+      socket.emit("world_tick", snapshotWorld(world, socket.id));
+    }
   });
 
   socket.on("disconnect", () => {
@@ -617,7 +659,7 @@ async function startPlayerDialogue({ socket, player, npc, context, topicHint }) 
       target: { id: player.playerId, name: player.name || "Traveler", role: "Visitor", traits: [] },
       worldContext: context,
       memories: await getRecentMemories(db, npc.id, 4),
-      topicHint: topicHint || "reply to player interaction"
+      topicHint: topicHint || `casual personal talk about ${pickRandom(TOWN_LIFE_TOPIC_HINTS)}`
     });
   }
 
@@ -694,7 +736,10 @@ async function maybeTriggerNpcConversation() {
         target,
         worldContext: context,
         memories: await getRecentMemories(db, speaker.id, 4),
-        topicHint: i === 0 ? "current rumors and duties" : `reply to ${target.name}: "${previousLine}"`
+        topicHint:
+          i === 0
+            ? `casual NPC-to-NPC talk about ${pickRandom(TOWN_LIFE_TOPIC_HINTS)}`
+            : `reply to ${target.name} naturally: "${previousLine}"`
       });
 
       io.emit("dialogue_event", {

@@ -3,6 +3,18 @@ import OpenAI from "openai";
 const IMMERSION_RULE =
   "You are writing in-world medieval/cozy town dialogue for a pixel-art fantasy town. Avoid references to modern technology, internet, smartphones, or LLMs.";
 
+const SMALL_TALK_TOPICS = [
+  "their daily routine",
+  "food and cooking",
+  "neighbors and town personalities",
+  "weather and mood",
+  "work frustrations or pride",
+  "small personal worries",
+  "hopes for tomorrow",
+  "a funny thing seen in town",
+  "local places and atmosphere"
+];
+
 function extractJsonString(text) {
   if (!text) return "";
   const trimmed = text.trim();
@@ -41,19 +53,19 @@ function shortenLine(text, maxWords = 14) {
 
 function fallbackLine(speaker, target, worldContext) {
   const roleLineByRole = {
-    Businessman: "Margins are thin today; taxes and transport eat every coin.",
-    Politician: "Order is fragile. One rumor can sway tomorrow's council vote.",
-    Fisherman: "If clouds keep low at dusk, the river yields silver fin by dawn.",
-    "Shop Owner": "No one leaves my stall unhappy, but I watch every ledger mark.",
-    Artist: "The square looked dull, so I painted it with storm colors in my head.",
-    "Religious Devotee": "Mercy and discipline must walk together, or faith dries up.",
-    Cultist: "The forest listens when the bell tolls twice at moonrise.",
-    "Town Guard": "I keep watch by the square; peace survives only with discipline.",
-    Herbalist: "Mossleaf and rootbloom calm fevers better than any loud promise.",
-    Blacksmith: "Iron speaks plain: strike true, cool slow, and the edge holds."
+    Businessman: "I smile at customers, then panic over rent and cart fees.",
+    Politician: "People think I love speeches; I mostly lose sleep over everyone.",
+    Fisherman: "Some mornings I hum to nets; it keeps my hands steady.",
+    "Shop Owner": "I remember who buys sweets when they're sad. It's never random.",
+    Artist: "I keep chasing light on walls. It changes faster than people.",
+    "Religious Devotee": "Most days I listen more than I preach. Folks carry heavy hearts.",
+    Cultist: "Even I need normal days: soup, silence, and no omens.",
+    "Town Guard": "I act stern, but I check doors softly so children sleep.",
+    Herbalist: "I dry herbs at dawn; the scent makes hard days gentler.",
+    Blacksmith: "Hammering calms me more than talking ever has."
   };
 
-  const base = roleLineByRole[speaker.role] || "The town feels tense today.";
+  const base = roleLineByRole[speaker.role] || "It's an ordinary day, and that's a blessing.";
   return `${base} (${worldContext.timeLabel}, ${speaker.area})`;
 }
 
@@ -75,19 +87,28 @@ export class DialogueService {
       `Speaker: ${speaker.name}, role=${speaker.role}, traits=${speaker.traits.join(", ")}`,
       `Target: ${target.name}, role=${target.role}`,
       `Time: ${worldContext.timeLabel}, Area: ${speaker.area}, Weather: ${worldContext.weather}`,
-      `Rumor: ${worldContext.rumorOfTheDay}`,
+      `Town rumor (optional context, not required): ${worldContext.rumorOfTheDay}`,
       `Topic hint: ${topicHint || "local town matters"}`,
+      `Natural conversation topics to prefer: ${SMALL_TALK_TOPICS.join(", ")}`,
       `Recent memories: ${memories.map((m) => m.content).join(" | ") || "none"}`
     ].join("\n");
 
     const response = await this.client.responses.create({
       model: "gpt-4.1-mini",
       input: [
-        { role: "system", content: `${IMMERSION_RULE} Keep each line under 14 words.` },
+        {
+          role: "system",
+          content: `${IMMERSION_RULE}
+Keep each line under 14 words.
+Write like a real person with personality, not an NPC mission bot.
+Prioritize daily-life talk: feelings, work, neighbors, food, weather, little observations.
+Only occasionally mention rumors/duties/quests, and only when natural (rare).
+When replying to a player's message, usually respond to their topic/tone directly, but sometimes pivot naturally.`
+        },
         {
           role: "developer",
           content:
-            "Output JSON with keys line, emotion, memoryWrite. Return only raw JSON, no markdown/code fences. Keep tone in-character and context-aware."
+            "Output JSON with keys line, emotion, memoryWrite. Return only raw JSON, no markdown/code fences. Keep tone in-character and context-aware. memoryWrite should summarize human-like social content briefly."
         },
         { role: "user", content: prompt }
       ]
