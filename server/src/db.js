@@ -23,17 +23,18 @@ export function initDb() {
   // on platforms without outbound IPv6 routing.
   dns.setDefaultResultOrder("ipv4first");
 
-  const renderDetected =
-    String(process.env.RENDER || "").toLowerCase() === "true" ||
-    Boolean(process.env.RENDER_SERVICE_ID) ||
-    Boolean(process.env.RENDER_INSTANCE_ID);
-  const forceIpv4 =
-    process.env.PG_FORCE_IPV4 === "true" || (process.env.PG_FORCE_IPV4 !== "false" && renderDetected);
+  const forceIpv4 = process.env.PG_FORCE_IPV4 !== "false";
 
   const pool = new Pool({
     connectionString,
     ssl: buildSslConfig(connectionString),
-    ...(forceIpv4 ? { family: 4 } : {})
+    ...(forceIpv4
+      ? {
+          family: 4,
+          lookup: (hostname, options, callback) =>
+            dns.lookup(hostname, { ...options, family: 4, all: false }, callback)
+        }
+      : {})
   });
 
   return pool;

@@ -65,18 +65,43 @@ import {
 } from "./world.js";
 
 const PORT = Number(process.env.PORT || 3002);
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+const DEFAULT_CLIENT_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"];
+const CLIENT_ORIGINS = String(process.env.CLIENT_ORIGIN || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const CLIENT_ORIGIN_SET = new Set([...DEFAULT_CLIENT_ORIGINS, ...CLIENT_ORIGINS]);
+const isAllowedOrigin = (origin) => !origin || CLIENT_ORIGIN_SET.has(origin);
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (isAllowedOrigin(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error(`Not allowed by CORS: ${origin}`));
+  }
+};
 const AUTOSAVE_INTERVAL_MS = Number(process.env.AUTOSAVE_INTERVAL_MS || 15000);
 const SAVE_DIR = path.resolve(process.cwd(), "data");
 const SAVE_PATH = path.join(SAVE_DIR, "world-save.json");
 
 const app = express();
-app.use(cors({ origin: CLIENT_ORIGIN }));
+app.use(cors(corsOptions));
 app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: CLIENT_ORIGIN, methods: ["GET", "POST"] }
+  cors: {
+    origin(origin, callback) {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error(`Not allowed by Socket.IO CORS: ${origin}`));
+    },
+    methods: ["GET", "POST"]
+  }
 });
 
 const db = initDb();
