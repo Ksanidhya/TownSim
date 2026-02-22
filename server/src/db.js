@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import dns from "node:dns";
 
 function buildSslConfig(connectionString) {
   const forceSsl = process.env.PG_SSL === "true";
@@ -18,7 +19,14 @@ export function initDb() {
     throw new Error("DATABASE_URL is required. Set it in server/.env.");
   }
 
-  const renderDetected = String(process.env.RENDER || "").toLowerCase() === "true";
+  // Prefer IPv4 when both A and AAAA records are present to avoid ENETUNREACH
+  // on platforms without outbound IPv6 routing.
+  dns.setDefaultResultOrder("ipv4first");
+
+  const renderDetected =
+    String(process.env.RENDER || "").toLowerCase() === "true" ||
+    Boolean(process.env.RENDER_SERVICE_ID) ||
+    Boolean(process.env.RENDER_INSTANCE_ID);
   const forceIpv4 =
     process.env.PG_FORCE_IPV4 === "true" || (process.env.PG_FORCE_IPV4 !== "false" && renderDetected);
 
