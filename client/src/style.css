@@ -171,8 +171,7 @@ body[data-time-phase="night"] {
 #chat-input,
 #chat-send,
 #sleep-toggle,
-#farm-controls select,
-#farm-controls button {
+#farm-controls select {
   font: inherit;
   border-radius: 10px;
   border: 1px solid var(--chip-border);
@@ -190,8 +189,7 @@ body[data-time-phase="night"] {
 
 #start-form button,
 #chat-send,
-#sleep-toggle,
-#farm-controls button {
+#sleep-toggle {
   background: linear-gradient(180deg, #5f7550 0%, #45563d 100%);
   color: #f5f8ee;
   cursor: pointer;
@@ -200,15 +198,13 @@ body[data-time-phase="night"] {
 
 #start-form button:hover,
 #chat-send:hover,
-#sleep-toggle:hover,
-#farm-controls button:hover {
+#sleep-toggle:hover {
   background: linear-gradient(180deg, #70895e 0%, #516748 100%);
 }
 
 #start-form button:active,
 #chat-send:active,
-#sleep-toggle:active,
-#farm-controls button:active {
+#sleep-toggle:active {
   transform: translateY(1px);
 }
 
@@ -277,11 +273,28 @@ button:focus-visible,
   pointer-events: auto;
 }
 
+#farm-panel.hidden {
+  display: none;
+}
+
 #farm-title,
 #news-title {
   font-weight: 700;
   color: var(--accent);
   margin-bottom: 7px;
+}
+
+.farm-tool-btn {
+  background: linear-gradient(180deg, #6b744f 0%, #4f583a 100%);
+  color: #f5f1df;
+  border: 1px solid var(--chip-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.farm-tool-btn:hover {
+  background: linear-gradient(180deg, #77835a 0%, #586443 100%);
 }
 
 .farm-chip,

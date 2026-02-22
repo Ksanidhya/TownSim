@@ -120,6 +120,23 @@ export async function getRecentMemories(db, npcId, limit = 6) {
   return result.rows;
 }
 
+export async function getRecentMemoriesByTag(db, npcId, tagLike, limit = 6) {
+  const tag = String(tagLike || "").trim();
+  if (!tag) return [];
+  const result = await db.query(
+    `
+      SELECT npc_id, memory_type, content, importance, tags, created_at
+      FROM memories
+      WHERE npc_id = $1
+        AND tags LIKE $2
+      ORDER BY id DESC
+      LIMIT $3
+    `,
+    [npcId, `%${tag}%`, limit]
+  );
+  return result.rows;
+}
+
 export async function upsertRelationshipDelta(db, npcId, playerId, delta) {
   await db.query(
     `

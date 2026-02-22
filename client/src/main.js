@@ -7,6 +7,14 @@ const WORLD_WIDTH = 1600;
 const WORLD_HEIGHT = 1200;
 const TILE = 32;
 const DIALOGUE_BUBBLE_MS = 5000;
+const CROP_GROW_MINUTES = {
+  turnip: 180,
+  carrot: 240,
+  pumpkin: 360
+};
+const HOME_FIELD_CENTER = { x: 675, y: 280 };
+const HOME_FIELD_SIZE = { w: 340, h: 280 };
+const FARM_TOOL_DISTANCE = 170;
 let ACTIVE_PROFILE = { playerId: "", name: "Traveler", gender: "unspecified" };
 
 function clamp01(value) {
@@ -203,7 +211,7 @@ const AREAS = [
   { name: "Dock", x: 1180, y: 760, w: 340, h: 300, color: 0x4f748c },
   { name: "Sanctum", x: 1060, y: 160, w: 280, h: 220, color: 0x6f616c },
   { name: "Forest", x: 120, y: 760, w: 360, h: 320, color: 0x3f6a47 },
-  { name: "Housing", x: 520, y: 120, w: 420, h: 240, color: 0x6f5f4e }
+  { name: "Housing", x: 470, y: 80, w: 530, h: 330, color: 0x6f5f4e }
 ];
 
 class TownScene extends Phaser.Scene {
@@ -224,6 +232,10 @@ class TownScene extends Phaser.Scene {
     this.lastTimePhase = "";
     this.lastWorldTimeMinutes = null;
     this.sleepSkipHideTimer = null;
+    this.farmToolbelt = null;
+    this.farmToolButtons = [];
+    this.isNearFarm = false;
+    this.farmPanelVisible = false;
   }
 
   init(data) {
@@ -265,8 +277,10 @@ class TownScene extends Phaser.Scene {
     this.setupSocket();
     this.setupChatControls();
     this.setupFarmControls();
+    this.createFarmToolbelt();
     this.setupDialogueKeyboardControls();
     this.updateChatTarget();
+    this.setFarmPanelVisible(false);
   }
 
   createLightingLayer() {
@@ -327,19 +341,34 @@ class TownScene extends Phaser.Scene {
     ]);
 
     const block = this.make.graphics({ x: 0, y: 0, add: false });
-    block.fillStyle(0x6c4536, 1);
-    block.fillRect(0, 0, TILE * 2, 12);
-    block.fillStyle(0x8f5d49, 1);
-    block.fillRect(2, 12, TILE * 2 - 4, 6);
-    block.fillStyle(0xc4af86, 1);
-    block.fillRect(0, 18, TILE * 2, TILE * 2 - 18);
-    block.fillStyle(0xa18966, 1);
-    block.fillRect(0, 46, TILE * 2, 4);
-    block.fillStyle(0x2a2a2a, 1);
-    block.fillRect(26, 34, 12, 20);
-    block.fillStyle(0xe4cb86, 1);
-    block.fillRect(8, 30, 12, 10);
-    block.fillRect(44, 30, 12, 10);
+    block.fillStyle(0x513224, 1);
+    block.fillRect(0, 2, TILE * 2, 10);
+    block.fillStyle(0x69412f, 1);
+    for (let rx = 0; rx < TILE * 2; rx += 8) {
+      block.fillRect(rx, 12, 6, 5);
+    }
+    block.fillStyle(0xbcaa83, 1);
+    block.fillRect(2, 18, TILE * 2 - 4, TILE * 2 - 20);
+    block.fillStyle(0xcebb91, 1);
+    block.fillRect(5, 22, TILE * 2 - 10, TILE * 2 - 26);
+    block.fillStyle(0x7f6a46, 1);
+    block.fillRect(0, 47, TILE * 2, 4);
+    block.fillStyle(0x2b231a, 1);
+    block.fillRect(26, 32, 12, 22);
+    block.fillStyle(0xe8d194, 1);
+    block.fillRect(8, 30, 12, 9);
+    block.fillRect(44, 30, 12, 9);
+    block.fillStyle(0x8e7d5f, 1);
+    block.fillRect(13, 33, 2, 6);
+    block.fillRect(49, 33, 2, 6);
+    block.fillStyle(0xa5432d, 1);
+    block.fillRect(46, 8, 7, 11);
+    block.fillStyle(0x6e2e20, 1);
+    block.fillRect(47, 6, 5, 2);
+    block.fillStyle(0x39312a, 1);
+    block.fillRect(0, 18, TILE * 2, 1);
+    block.fillRect(0, 29, TILE * 2, 1);
+    block.fillRect(0, 40, TILE * 2, 1);
     block.generateTexture("tile_house", TILE * 2, TILE * 2);
     block.destroy();
 
@@ -363,6 +392,40 @@ class TownScene extends Phaser.Scene {
     shrub.generateTexture("tile_shrub", TILE, TILE);
     shrub.destroy();
 
+    const pine = this.make.graphics({ x: 0, y: 0, add: false });
+    pine.fillStyle(0x3b2a1d, 1);
+    pine.fillRect(14, 20, 4, 10);
+    pine.fillStyle(0x2e5938, 1);
+    pine.fillTriangle(16, 3, 7, 17, 25, 17);
+    pine.fillStyle(0x356843, 1);
+    pine.fillTriangle(16, 8, 6, 21, 26, 21);
+    pine.fillStyle(0x3f7650, 1);
+    pine.fillTriangle(16, 13, 5, 26, 27, 26);
+    pine.generateTexture("tile_pine", TILE, TILE);
+    pine.destroy();
+
+    const fern = this.make.graphics({ x: 0, y: 0, add: false });
+    fern.fillStyle(0x355e3f, 1);
+    fern.fillTriangle(16, 9, 8, 21, 13, 21);
+    fern.fillTriangle(16, 9, 19, 21, 24, 21);
+    fern.fillStyle(0x42764f, 1);
+    fern.fillTriangle(16, 11, 11, 23, 16, 23);
+    fern.fillTriangle(16, 11, 16, 23, 21, 23);
+    fern.fillStyle(0x2f5237, 1);
+    fern.fillRect(15, 22, 2, 6);
+    fern.generateTexture("tile_fern", TILE, TILE);
+    fern.destroy();
+
+    const stump = this.make.graphics({ x: 0, y: 0, add: false });
+    stump.fillStyle(0x4b3424, 1);
+    stump.fillRoundedRect(7, 16, 18, 10, 4);
+    stump.fillStyle(0x7e5a3d, 1);
+    stump.fillEllipse(16, 16, 17, 6);
+    stump.fillStyle(0x9a7350, 1);
+    stump.fillEllipse(16, 16, 9, 3);
+    stump.generateTexture("tile_stump", TILE, TILE);
+    stump.destroy();
+
     const lamp = this.make.graphics({ x: 0, y: 0, add: false });
     lamp.fillStyle(0x493e2c, 1);
     lamp.fillRect(14, 12, 4, 18);
@@ -370,6 +433,42 @@ class TownScene extends Phaser.Scene {
     lamp.fillRect(11, 8, 10, 6);
     lamp.generateTexture("tile_lamp", TILE, TILE);
     lamp.destroy();
+
+    const sowTool = this.make.graphics({ x: 0, y: 0, add: false });
+    sowTool.fillStyle(0x6d4b2e, 1);
+    sowTool.fillRect(3, 16, 14, 3);
+    sowTool.fillStyle(0x8f6b47, 1);
+    sowTool.fillRect(4, 13, 8, 3);
+    sowTool.fillStyle(0x9a9d9f, 1);
+    sowTool.fillTriangle(15, 10, 23, 14, 15, 18);
+    sowTool.generateTexture("tool_sow", 26, 26);
+    sowTool.destroy();
+
+    const waterTool = this.make.graphics({ x: 0, y: 0, add: false });
+    waterTool.fillStyle(0x567c95, 1);
+    waterTool.fillRoundedRect(5, 10, 14, 9, 3);
+    waterTool.fillStyle(0x8cb1c4, 1);
+    waterTool.fillRect(7, 8, 10, 2);
+    waterTool.lineStyle(2, 0xacc8d4, 1);
+    waterTool.strokeCircle(18, 13, 5);
+    waterTool.fillStyle(0x86c7db, 1);
+    waterTool.fillCircle(22, 19, 2);
+    waterTool.generateTexture("tool_water", 26, 26);
+    waterTool.destroy();
+
+    const harvestTool = this.make.graphics({ x: 0, y: 0, add: false });
+    harvestTool.fillStyle(0x7a5432, 1);
+    harvestTool.fillRoundedRect(5, 11, 16, 10, 3);
+    harvestTool.lineStyle(2, 0xc9a36d, 1);
+    harvestTool.lineBetween(8, 11, 8, 7);
+    harvestTool.lineBetween(18, 11, 18, 7);
+    harvestTool.lineBetween(8, 7, 18, 7);
+    harvestTool.fillStyle(0xe2be67, 1);
+    harvestTool.fillCircle(10, 15, 2);
+    harvestTool.fillCircle(14, 16, 2);
+    harvestTool.fillCircle(17, 15, 2);
+    harvestTool.generateTexture("tool_harvest", 26, 26);
+    harvestTool.destroy();
 
     const player = this.make.graphics({ x: 0, y: 0, add: false });
     player.fillStyle(0x121212, 0.22);
@@ -436,7 +535,7 @@ class TownScene extends Phaser.Scene {
 
     paintPath(220, 240, 280, 420);
     paintPath(560, 460, 480, 280);
-    paintPath(520, 120, 420, 240);
+    paintPath(470, 80, 530, 330);
     paintPath(1060, 160, 280, 220);
 
     const buildings = [
@@ -445,11 +544,17 @@ class TownScene extends Phaser.Scene {
       { x: 620, y: 160 },
       { x: 760, y: 200 },
       { x: 1120, y: 210 },
-      { x: 900, y: 540 }
+      { x: 900, y: 540 },
+      { x: 540, y: 610 },
+      { x: 1040, y: 570 }
     ];
-    for (const b of buildings) {
-      this.add.image(b.x + 2, b.y + 2, "tile_house").setOrigin(0.5).setTint(0x000000).setAlpha(0.18);
-      this.add.image(b.x, b.y, "tile_house").setOrigin(0.5);
+    for (const [idx, b] of buildings.entries()) {
+      const colorShift = [0xffffff, 0xf8f4e6, 0xf1e7d2][idx % 3];
+      this.add.image(b.x + 3, b.y + 3, "tile_house").setOrigin(0.5).setTint(0x000000).setAlpha(0.2);
+      this.add.image(b.x, b.y, "tile_house").setOrigin(0.5).setTint(colorShift);
+      this.add.rectangle(b.x, b.y + 30, 36, 4, 0x6f553a, 0.92).setDepth(6);
+      this.add.rectangle(b.x - 14, b.y + 33, 6, 7, 0x876c4a, 0.9).setDepth(6);
+      this.add.rectangle(b.x + 14, b.y + 33, 6, 7, 0x876c4a, 0.9).setDepth(6);
     }
 
     const treePoints = [
@@ -461,12 +566,94 @@ class TownScene extends Phaser.Scene {
       [500, 860],
       [1120, 1000],
       [1180, 960],
-      [1240, 910]
+      [1240, 910],
+      [120, 190],
+      [170, 150],
+      [1240, 150],
+      [1300, 210],
+      [1410, 350],
+      [1450, 780],
+      [1420, 1040],
+      [860, 920],
+      [960, 980],
+      [640, 990],
+      [260, 600],
+      [220, 690],
+      [420, 720]
     ];
     treePoints.forEach(([x, y], i) => {
       const tex = i % 3 === 0 ? "tile_shrub" : "tile_tree";
       this.add.image(x, y, tex).setDepth(6);
     });
+
+    const shrubPoints = [
+      [240, 330],
+      [360, 230],
+      [510, 330],
+      [820, 120],
+      [970, 140],
+      [1150, 340],
+      [1000, 720],
+      [820, 810],
+      [690, 710],
+      [540, 820],
+      [380, 880],
+      [1270, 860]
+    ];
+    shrubPoints.forEach(([x, y]) => {
+      this.add.image(x, y, "tile_shrub").setDepth(6);
+    });
+
+    const forestArea = AREAS.find((a) => a.name === "Forest");
+    if (forestArea) {
+      const forestLayer = this.add.graphics().setDepth(4);
+      forestLayer.fillStyle(0x203126, 0.34);
+      forestLayer.fillRect(forestArea.x, forestArea.y, forestArea.w, forestArea.h);
+      forestLayer.fillStyle(0x2a4031, 0.2);
+      for (let i = 0; i < 120; i += 1) {
+        const px = forestArea.x + 8 + ((i * 37) % (forestArea.w - 16));
+        const py = forestArea.y + 8 + ((i * 53) % (forestArea.h - 16));
+        forestLayer.fillCircle(px, py, 3 + (i % 3));
+      }
+
+      const denseTrees = [];
+      for (let row = 0; row < 6; row += 1) {
+        for (let col = 0; col < 8; col += 1) {
+          const x = forestArea.x + 28 + col * 42 + ((row % 2) * 10 - 5);
+          const y = forestArea.y + 28 + row * 46 + ((col % 2) * 9 - 4);
+          denseTrees.push([x, y]);
+        }
+      }
+      denseTrees.forEach(([x, y], i) => {
+        const isPine = i % 2 === 0;
+        const tex = isPine ? "tile_pine" : "tile_tree";
+        this.add.image(x + 2, y + 3, tex).setTint(0x000000).setAlpha(0.18).setDepth(6);
+        this.add.image(x, y, tex).setDepth(7).setScale(isPine ? 1.02 : 1);
+      });
+
+      for (let i = 0; i < 40; i += 1) {
+        const x = forestArea.x + 24 + ((i * 67) % (forestArea.w - 46));
+        const y = forestArea.y + 20 + ((i * 41) % (forestArea.h - 42));
+        const tex = i % 5 === 0 ? "tile_stump" : i % 2 === 0 ? "tile_fern" : "tile_shrub";
+        this.add.image(x, y, tex).setDepth(6);
+      }
+
+      const trails = this.add.graphics().setDepth(5);
+      trails.lineStyle(10, 0x4b5f49, 0.42);
+      trails.lineBetween(forestArea.x + 30, forestArea.y + 30, forestArea.x + forestArea.w - 50, forestArea.y + forestArea.h - 40);
+      trails.lineBetween(forestArea.x + 95, forestArea.y + forestArea.h - 20, forestArea.x + forestArea.w - 20, forestArea.y + 90);
+      trails.lineStyle(4, 0x6c7c67, 0.25);
+      trails.lineBetween(forestArea.x + 30, forestArea.y + 30, forestArea.x + forestArea.w - 50, forestArea.y + forestArea.h - 40);
+      trails.lineBetween(forestArea.x + 95, forestArea.y + forestArea.h - 20, forestArea.x + forestArea.w - 20, forestArea.y + 90);
+
+      const canopyShade = this.add.graphics().setDepth(8);
+      canopyShade.fillStyle(0x102018, 0.18);
+      for (let i = 0; i < 28; i += 1) {
+        const x = forestArea.x + 16 + ((i * 59) % (forestArea.w - 24));
+        const y = forestArea.y + 16 + ((i * 83) % (forestArea.h - 24));
+        canopyShade.fillEllipse(x, y, 34 + (i % 4) * 8, 16 + (i % 3) * 7);
+      }
+    }
 
     const lampPoints = [
       [600, 500],
@@ -479,14 +666,61 @@ class TownScene extends Phaser.Scene {
       this.add.image(x, y, "tile_lamp").setDepth(7);
     });
 
-    const homeField = this.add.rectangle(642, 292, 160, 150, 0x6b5432, 0.36);
-    homeField.setStrokeStyle(1, 0xb2925a, 0.6);
-    this.add.text(565, 222, "Your Home Field", {
+    const dockDeck = this.add.graphics();
+    const drawDockPlanks = (x, y, w, h) => {
+      dockDeck.fillStyle(0x6e4f34, 0.95);
+      dockDeck.fillRect(x, y, w, h);
+      for (let py = y + 3; py < y + h; py += 8) {
+        dockDeck.lineStyle(1, 0x7f5e3f, 0.95);
+        dockDeck.lineBetween(x + 4, py, x + w - 4, py);
+      }
+      for (let px = x + 14; px < x + w; px += 28) {
+        dockDeck.lineStyle(1, 0x5a3f29, 0.95);
+        dockDeck.lineBetween(px, y + 3, px, y + h - 3);
+      }
+    };
+    drawDockPlanks(1202, 792, 190, 46);
+    drawDockPlanks(1238, 838, 42, 155);
+    for (const post of [
+      [1212, 784],
+      [1268, 784],
+      [1324, 784],
+      [1380, 784],
+      [1246, 838],
+      [1246, 908],
+      [1246, 980],
+      [1280, 980]
+    ]) {
+      const [x, y] = post;
+      this.add.rectangle(x, y, 6, 12, 0x4f3624, 0.98).setDepth(6);
+      this.add.rectangle(x, y - 4, 8, 4, 0x8c6947, 0.95).setDepth(6);
+    }
+    dockDeck.setDepth(5);
+
+    const homeField = this.add.rectangle(HOME_FIELD_CENTER.x, HOME_FIELD_CENTER.y, HOME_FIELD_SIZE.w, HOME_FIELD_SIZE.h, 0x6b5432, 0.34);
+    homeField.setStrokeStyle(2, 0xc1a572, 0.7);
+    this.add
+      .rectangle(HOME_FIELD_CENTER.x, HOME_FIELD_CENTER.y, HOME_FIELD_SIZE.w + 20, HOME_FIELD_SIZE.h + 20, 0x2d2317, 0)
+      .setStrokeStyle(1, 0xdcc38c, 0.65)
+      .setDepth(3);
+    this.add.text(HOME_FIELD_CENTER.x - 132, HOME_FIELD_CENTER.y - 148, "Your Home Field", {
       fontSize: "11px",
       color: "#f6e8bb",
       stroke: "#1a1a1a",
       strokeThickness: 2
     });
+    for (let fx = HOME_FIELD_CENTER.x - 158; fx <= HOME_FIELD_CENTER.x + 158; fx += 20) {
+      this.add.rectangle(fx, HOME_FIELD_CENTER.y + 145, 4, 14, 0x8b6b44, 0.9).setDepth(4);
+      this.add.rectangle(fx, HOME_FIELD_CENTER.y - 145, 4, 14, 0x8b6b44, 0.9).setDepth(4);
+    }
+    for (let fy = HOME_FIELD_CENTER.y - 145; fy <= HOME_FIELD_CENTER.y + 145; fy += 20) {
+      this.add.rectangle(HOME_FIELD_CENTER.x - 170, fy, 4, 14, 0x8b6b44, 0.9).setDepth(4);
+      this.add.rectangle(HOME_FIELD_CENTER.x + 170, fy, 4, 14, 0x8b6b44, 0.9).setDepth(4);
+    }
+    this.add.rectangle(HOME_FIELD_CENTER.x, HOME_FIELD_CENTER.y + 145, 52, 4, 0x8b6b44, 0.95).setDepth(4);
+    this.add.rectangle(HOME_FIELD_CENTER.x, HOME_FIELD_CENTER.y - 145, 52, 4, 0x8b6b44, 0.95).setDepth(4);
+    this.add.rectangle(HOME_FIELD_CENTER.x + 120, HOME_FIELD_CENTER.y + 105, 44, 36, 0x7b5b37, 0.95).setDepth(5);
+    this.add.rectangle(HOME_FIELD_CENTER.x + 120, HOME_FIELD_CENTER.y + 86, 48, 8, 0x5f4330, 0.96).setDepth(5);
 
     AREAS.forEach((a) => {
       this.add
@@ -561,26 +795,137 @@ class TownScene extends Phaser.Scene {
         this.socket.emit("player_state", { sleeping: this.isSleeping });
       }
     });
+
   }
 
   setupFarmControls() {
+    const cropSelect = document.getElementById("farm-crop");
     const sowBtn = document.getElementById("farm-sow");
     const waterBtn = document.getElementById("farm-water");
     const harvestBtn = document.getElementById("farm-harvest");
-    const cropSelect = document.getElementById("farm-crop");
+    const farmUnselect = document.getElementById("farm-unselect");
+    cropSelect.addEventListener("change", () => this.updateFarmHud());
+    sowBtn?.addEventListener("click", () => this.sendFarmAction("sow"));
+    waterBtn?.addEventListener("click", () => this.sendFarmAction("water"));
+    harvestBtn?.addEventListener("click", () => this.sendFarmAction("harvest"));
+    farmUnselect?.addEventListener("click", () => this.clearSelectedPlot());
+    this.input.keyboard.on("keydown-ONE", () => this.sendFarmAction("sow"));
+    this.input.keyboard.on("keydown-TWO", () => this.sendFarmAction("water"));
+    this.input.keyboard.on("keydown-THREE", () => this.sendFarmAction("harvest"));
+    this.input.keyboard.on("keydown-Q", () => this.shiftFarmCrop(-1));
+    this.input.keyboard.on("keydown-E", () => this.shiftFarmCrop(1));
+  }
 
-    const sendFarmAction = (action) => {
-      if (!this.socket?.connected || !this.selectedPlotId || this.isDialogueHardLocked) return;
-      this.socket.emit("farm_action", {
-        action,
-        plotId: this.selectedPlotId,
-        cropType: cropSelect.value
-      });
+  createFarmToolbelt() {
+    const panel = this.add.container(0, 0).setDepth(130).setScrollFactor(0);
+    const bg = this.add.rectangle(0, 0, 220, 56, 0x12100d, 0.84).setStrokeStyle(1, 0xd0bd8b, 0.9);
+    const title = this.add.text(-98, -23, "Farm Tools", {
+      fontSize: "11px",
+      color: "#f1e4b2"
+    });
+    panel.add([bg, title]);
+
+    const makeToolButton = (x, key, action, hotkey) => {
+      const hit = this.add.circle(x, 5, 13, 0x000000, 0).setStrokeStyle(1, 0xc9ba90, 0.95);
+      const icon = this.add.image(x, 5, key).setScale(1.2);
+      const label = this.add.text(x - 18, 19, hotkey, { fontSize: "9px", color: "#dfd2a3" });
+      hit.setInteractive({ useHandCursor: true });
+      hit.on("pointerdown", () => this.sendFarmAction(action));
+      panel.add([hit, icon, label]);
+      return { action, hit, icon, label };
     };
 
-    sowBtn.addEventListener("click", () => sendFarmAction("sow"));
-    waterBtn.addEventListener("click", () => sendFarmAction("water"));
-    harvestBtn.addEventListener("click", () => sendFarmAction("harvest"));
+    this.farmToolButtons = [
+      makeToolButton(-62, "tool_sow", "sow", "1"),
+      makeToolButton(0, "tool_water", "water", "2"),
+      makeToolButton(62, "tool_harvest", "harvest", "3")
+    ];
+    this.farmToolbelt = panel;
+    this.positionFarmToolbelt();
+    this.updateFarmToolbeltState();
+    this.scale.on("resize", () => this.positionFarmToolbelt());
+  }
+
+  positionFarmToolbelt() {
+    if (!this.farmToolbelt) return;
+    const cam = this.cameras.main;
+    this.farmToolbelt.setPosition(cam.width * 0.5, cam.height - 44);
+  }
+
+  shiftFarmCrop(direction = 1) {
+    const cropSelect = document.getElementById("farm-crop");
+    if (!cropSelect || !cropSelect.options?.length) return;
+    const len = cropSelect.options.length;
+    const next = (cropSelect.selectedIndex + direction + len) % len;
+    cropSelect.selectedIndex = next;
+    this.updateFarmHud();
+  }
+
+  sendFarmAction(action) {
+    if (!this.socket?.connected || !this.selectedPlotId || this.isDialogueHardLocked || !this.isNearFarm) return;
+    const cropSelect = document.getElementById("farm-crop");
+    this.socket.emit("farm_action", {
+      action,
+      plotId: this.selectedPlotId,
+      cropType: cropSelect?.value || "turnip"
+    });
+  }
+
+  clearSelectedPlot() {
+    this.selectedPlotId = null;
+    this.setFarmPanelVisible(false);
+    this.updateFarmHud();
+    this.updateFarmToolbeltState();
+    this.syncFarmPlots();
+  }
+
+  clearSelectedPerson() {
+    if (this.isDialogueHardLocked) return;
+    this.activeDialogueNpcId = null;
+    this.activeDialogueNpcName = "";
+    this.updateChatTarget();
+    for (const sprite of this.npcSprites.values()) {
+      sprite.body.setTint(sprite.tint);
+      sprite.body.setScale(1);
+    }
+  }
+
+  isPlayerNearFarm() {
+    if (!this.farmData?.plots?.length) return false;
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const plot of this.farmData.plots) {
+      const dist = Math.hypot((plot.x || 0) - this.player.x, (plot.y || 0) - this.player.y);
+      if (dist < nearest) nearest = dist;
+    }
+    return nearest <= FARM_TOOL_DISTANCE;
+  }
+
+  updateFarmToolbeltState() {
+    this.isNearFarm = this.isPlayerNearFarm();
+    if (this.farmToolbelt) {
+      this.farmToolbelt.setVisible(this.farmPanelVisible && this.isNearFarm);
+    }
+    const hintEl = document.getElementById("farm-hint");
+    if (hintEl) {
+      hintEl.textContent = this.isNearFarm
+        ? "Select a plot, then use tools or keys 1/2/3. Change crop with Q/E."
+        : "Move near your home field to access farming tools.";
+    }
+    const selected = this.selectedPlot();
+    const enabled = this.isNearFarm && Boolean(selected) && !this.isDialogueHardLocked && !this.isSleeping;
+    for (const btn of this.farmToolButtons) {
+      btn.hit.setAlpha(enabled ? 1 : 0.4);
+      btn.icon.setAlpha(enabled ? 1 : 0.45);
+      btn.label.setAlpha(enabled ? 1 : 0.45);
+    }
+  }
+
+  setFarmPanelVisible(visible) {
+    this.farmPanelVisible = Boolean(visible);
+    const panel = document.getElementById("farm-panel");
+    if (!panel) return;
+    panel.classList.toggle("hidden", !this.farmPanelVisible);
+    this.updateFarmToolbeltState();
   }
 
   setupDialogueKeyboardControls() {
@@ -599,6 +944,10 @@ class TownScene extends Phaser.Scene {
     };
     this.input.keyboard.on("keydown-SPACE", closeNews);
     this.input.keyboard.on("keydown-ENTER", closeNews);
+    this.input.keyboard.on("keydown-ESC", () => {
+      this.clearSelectedPlot();
+      this.clearSelectedPerson();
+    });
   }
 
   showMorningNews(news) {
@@ -637,23 +986,61 @@ class TownScene extends Phaser.Scene {
       world.dayNumber
     )}`;
     document.getElementById("weather").textContent = world.weather;
+    const econ = world.economy;
+    if (econ?.cropPrices) {
+      const t = econ.cropPrices.turnip ?? "-";
+      const c = econ.cropPrices.carrot ?? "-";
+      const p = econ.cropPrices.pumpkin ?? "-";
+      document.getElementById("economy").textContent = `Market ${econ.mood || "steady"}: T${t} C${c} P${p}`;
+    } else {
+      document.getElementById("economy").textContent = "Market: ...";
+    }
+    const events = Array.isArray(world.worldEvents?.active) ? world.worldEvents.active : [];
+    const eventsText =
+      events.length > 0
+        ? `Events: ${events
+            .slice(0, 2)
+            .map((evt) => `${evt.title}${evt.area ? ` (${evt.area})` : ""}`)
+            .join(" | ")}`
+        : "Events: none";
+    document.getElementById("world-events").textContent = eventsText;
+    const tensions = Array.isArray(world.factions?.tensions) ? world.factions.tensions : [];
+    const factionText =
+      tensions.length > 0
+        ? `Factions: ${tensions
+            .slice(0, 1)
+            .map((t) => `${t.a} vs ${t.b} (${t.level})`)
+            .join("")}`
+        : `Factions: ${Array.isArray(world.factions?.groups) ? world.factions.groups.length : 0} groups`;
+    document.getElementById("factions").textContent = factionText;
     const missionLabel = world.mission?.completed
       ? "Mission: All complete"
       : `Mission ${world.mission?.step || 1}/${world.mission?.total || 1}: ${world.mission?.title || "Explore town"}`;
     const missionProgress = world.mission?.progress ? ` (${world.mission.progress})` : "";
-    document.getElementById("mission").textContent = `${missionLabel}${missionProgress}`;
+    const missionReward = Number.isFinite(Number(world.mission?.rewardCoins)) ? ` | +${world.mission.rewardCoins}c` : "";
+    const urgencyText = Number(world.mission?.urgency) >= 3 ? " [Urgent]" : Number(world.mission?.urgency) === 2 ? " [Active]" : "";
+    document.getElementById("mission").textContent = `${missionLabel}${missionProgress}${missionReward}${urgencyText}`;
     const townMission = world.townMission;
     const townMissionText = townMission
       ? `Town Gossip Mission: ${townMission.title} (${townMission.progress})`
       : "Town Gossip Mission: waiting...";
     document.getElementById("town-mission").textContent = townMissionText;
+    const storyArc = world.storyArc;
+    const storyArcText = storyArc
+      ? storyArc.completed
+        ? `Story Arc: ${storyArc.title} (resolved)`
+        : `Story Arc ${storyArc.stageIndex || 1}/${storyArc.stageTotal || 1}: ${storyArc.currentStage || storyArc.title} (${storyArc.progress || "0/1"})`
+      : "Story Arc: waiting...";
+    document.getElementById("story-arc").textContent = storyArcText;
     this.applyDayNightVisuals(world);
 
     if (world.you?.name) {
       this.playerProfile.name = world.you.name;
       this.playerProfile.gender = world.you.gender || "unspecified";
       this.playerLabel.setText(world.you.name);
-      document.getElementById("player-profile").textContent = `Player: ${world.you.name} (${this.playerProfile.gender})`;
+      const repLabel = world.you?.reputation?.label ? `, rep: ${world.you.reputation.label}` : "";
+      document.getElementById("player-profile").textContent =
+        `Player: ${world.you.name} (${this.playerProfile.gender}${repLabel})`;
     }
 
     if (world.you) {
@@ -664,6 +1051,7 @@ class TownScene extends Phaser.Scene {
     this.farmData = world.farm || null;
     this.syncFarmPlots();
     this.updateFarmHud();
+    this.updateFarmToolbeltState();
 
     const activeIds = new Set();
     for (const npc of world.npcs) {
@@ -746,31 +1134,19 @@ class TownScene extends Phaser.Scene {
     }
   }
 
-  plotLabel(plot) {
-    if (plot.state === "empty") return "Empty";
-    if (plot.state === "ready") return `${plot.cropType} ready`;
-    const pct = Math.min(100, Math.round((plot.growth / Math.max(plot.growth, 1, 360)) * 100));
-    return `${plot.cropType} ${pct}%`;
-  }
-
   syncFarmPlots() {
     const liveIds = new Set();
     for (const plot of this.farmData?.plots || []) {
       liveIds.add(plot.id);
       let sprite = this.farmPlotSprites.get(plot.id);
 
-      const fillColorByState = {
-        empty: 0x7e633c,
-        seeded: 0x806131,
-        growing: 0x4e7d3e,
-        ready: 0xc59e3f
-      };
-      const fill = fillColorByState[plot.state] || 0x7e633c;
-
       if (!sprite) {
-        const soil = this.add.rectangle(plot.x, plot.y, 34, 34, fill, 0.95).setDepth(8);
-        soil.setStrokeStyle(1, 0x2c2117, 0.95);
-        soil.setInteractive({ useHandCursor: true });
+        const bed = this.add.graphics().setDepth(8);
+        const crop = this.add.graphics().setDepth(9);
+        const moisture = this.add.rectangle(plot.x, plot.y + 15, 0, 3, 0x4fa4cb, 0.95).setDepth(10);
+        const selection = this.add.rectangle(plot.x, plot.y, 38, 38, 0x000000, 0).setDepth(11);
+        selection.setStrokeStyle(1, 0x2c2117, 0.95);
+        selection.setInteractive({ useHandCursor: true });
         const label = this.add.text(plot.x - 16, plot.y - 8, `#${plot.id}`, {
           fontSize: "9px",
           color: "#f6edd0",
@@ -779,33 +1155,93 @@ class TownScene extends Phaser.Scene {
         });
         label.setDepth(10);
 
-        soil.on("pointerdown", () => {
-          this.selectedPlotId = plot.id;
+        selection.on("pointerdown", () => {
+          this.selectedPlotId = this.selectedPlotId === plot.id ? null : plot.id;
+          this.setFarmPanelVisible(Boolean(this.selectedPlotId));
           this.updateFarmHud();
+          this.updateFarmToolbeltState();
           this.syncFarmPlots();
         });
 
-        sprite = { soil, label };
+        sprite = { bed, crop, moisture, selection, label };
         this.farmPlotSprites.set(plot.id, sprite);
       }
 
-      sprite.soil.setPosition(plot.x, plot.y);
-      sprite.soil.setFillStyle(fill, 0.95);
       const selected = this.selectedPlotId === plot.id;
-      sprite.soil.setStrokeStyle(selected ? 2 : 1, selected ? 0xf6e27f : 0x2c2117, 0.95);
+      const baseByState = {
+        empty: 0x7c5e39,
+        seeded: 0x6f5433,
+        growing: 0x5f482b,
+        ready: 0x72502d
+      };
+      const accentByState = {
+        empty: 0x9b7a4d,
+        seeded: 0x8d6c43,
+        growing: 0x8f6a3c,
+        ready: 0xae8d4d
+      };
+      const base = baseByState[plot.state] || 0x7c5e39;
+      const accent = accentByState[plot.state] || 0x9b7a4d;
+
+      sprite.bed.clear();
+      sprite.bed.fillStyle(0x20160f, 0.28);
+      sprite.bed.fillRoundedRect(plot.x - 16, plot.y - 14, 32, 30, 4);
+      sprite.bed.fillStyle(base, 0.98);
+      sprite.bed.fillRoundedRect(plot.x - 15, plot.y - 15, 30, 28, 4);
+      sprite.bed.fillStyle(accent, 0.88);
+      for (let i = 0; i < 3; i += 1) {
+        sprite.bed.fillRect(plot.x - 12, plot.y - 10 + i * 8, 24, 2);
+      }
+
+      const waterPct = clamp01((plot.water || 0) / 100);
+      sprite.moisture.setPosition(plot.x, plot.y + 15);
+      sprite.moisture.width = Math.max(2, Math.round(28 * waterPct));
+      sprite.moisture.setFillStyle(waterPct > 0.65 ? 0x66b8d8 : waterPct > 0.25 ? 0x4d99be : 0x35647f, 0.95);
+
+      sprite.crop.clear();
+      const maxGrowth = CROP_GROW_MINUTES[plot.cropType] || 360;
+      const growthPct = clamp01((plot.growth || 0) / maxGrowth);
+      if (plot.state === "seeded") {
+        sprite.crop.fillStyle(0xcbb28a, 0.95);
+        sprite.crop.fillCircle(plot.x - 5, plot.y - 2, 1.7);
+        sprite.crop.fillCircle(plot.x + 1, plot.y + 1, 1.7);
+        sprite.crop.fillCircle(plot.x + 6, plot.y - 1, 1.7);
+      } else if (plot.state === "growing") {
+        const stemHeight = 4 + Math.round(growthPct * 8);
+        sprite.crop.lineStyle(2, 0x4e8e48, 1);
+        sprite.crop.lineBetween(plot.x - 4, plot.y + 5, plot.x - 4, plot.y + 5 - stemHeight);
+        sprite.crop.lineBetween(plot.x + 2, plot.y + 6, plot.x + 2, plot.y + 6 - stemHeight - 2);
+        sprite.crop.fillStyle(0x79bf68, 0.95);
+        sprite.crop.fillCircle(plot.x - 5, plot.y + 2 - stemHeight, 2.3);
+        sprite.crop.fillCircle(plot.x + 3, plot.y + 1 - stemHeight, 2.3);
+      } else if (plot.state === "ready") {
+        sprite.crop.fillStyle(0x4f8a3e, 1);
+        sprite.crop.fillCircle(plot.x - 5, plot.y + 1, 3.4);
+        sprite.crop.fillCircle(plot.x + 3, plot.y - 1, 3.4);
+        sprite.crop.fillStyle(0xf2cb5d, 0.96);
+        sprite.crop.fillCircle(plot.x - 4, plot.y - 3, 2.4);
+        sprite.crop.fillCircle(plot.x + 4, plot.y - 5, 2.4);
+      }
+
+      sprite.selection.setPosition(plot.x, plot.y);
+      sprite.selection.setStrokeStyle(selected ? 2 : 1, selected ? 0xf6e27f : 0x2c2117, 0.95);
       sprite.label.setText(`#${plot.id}`);
       sprite.label.setPosition(plot.x - 16, plot.y - 8);
     }
 
     for (const [plotId, sprite] of this.farmPlotSprites.entries()) {
       if (liveIds.has(plotId)) continue;
-      sprite.soil.destroy();
+      sprite.bed.destroy();
+      sprite.crop.destroy();
+      sprite.moisture.destroy();
+      sprite.selection.destroy();
       sprite.label.destroy();
       this.farmPlotSprites.delete(plotId);
     }
 
     if (this.selectedPlotId && !liveIds.has(this.selectedPlotId)) {
       this.selectedPlotId = null;
+      this.setFarmPanelVisible(false);
     }
   }
 
@@ -818,6 +1254,7 @@ class TownScene extends Phaser.Scene {
     const selectedEl = document.getElementById("farm-selected");
     const coinsEl = document.getElementById("farm-coins");
     const invEl = document.getElementById("farm-inventory");
+    const cropEl = document.getElementById("farm-crop");
 
     if (!this.farmData) {
       selectedEl.textContent = "Plot: none";
@@ -836,9 +1273,11 @@ class TownScene extends Phaser.Scene {
 
     coinsEl.textContent = `Coins: ${this.farmData.coins}`;
     const i = this.farmData.inventory || {};
+    const selectedCrop = cropEl?.value || "turnip";
+    const seeds = Number(i[`${selectedCrop}_seed`] || 0);
     invEl.textContent =
       `Inventory: turnip ${i.turnip || 0}, carrot ${i.carrot || 0}, pumpkin ${i.pumpkin || 0}` +
-      ` | seeds T:${i.turnip_seed || 0} C:${i.carrot_seed || 0} P:${i.pumpkin_seed || 0}`;
+      ` | seeds T:${i.turnip_seed || 0} C:${i.carrot_seed || 0} P:${i.pumpkin_seed || 0} | selected ${selectedCrop} seeds ${seeds}`;
   }
 
   addDialogue(evt) {
@@ -950,6 +1389,8 @@ class TownScene extends Phaser.Scene {
   update() {
     this.updateMovement();
     this.updateDialogueBubbles();
+    this.updateFarmToolbeltState();
+    this.positionFarmToolbelt();
 
     this.playerLabel.x = this.player.x - 10;
     this.playerLabel.y = this.player.y - 26;

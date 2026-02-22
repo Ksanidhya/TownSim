@@ -11,6 +11,7 @@ import {
   ensureSchema,
   getPlayerByUsername,
   initDb,
+  getRecentMemoriesByTag,
   getRecentMemories,
   hasNpcIntroducedToPlayer,
   touchPlayerLogin,
@@ -20,16 +21,42 @@ import {
 import { DialogueService } from "./dialogue.js";
 import { AREAS } from "./constants.js";
 import {
+  buildFollowupMemoryContext,
+  compactMemoryLines,
+  composeContinuityHint,
+  getOrCreateDailyFollowupHint
+} from "./followup.js";
+import { createCooldownGate } from "./ai-control.js";
+import { runDailyRefreshPipeline } from "./daily-reset.js";
+import {
+  MISSION_CHAIN,
+  applyPlayerReputationDelta,
   applyTownMissionEvent,
   applyMissionEvent,
   applyFarmAction,
+  missionRewardCoins,
   areaNameAt,
+  bumpNpcRelation,
   createPlayerFarmIfMissing,
   createWorldState,
   ensurePlayerMissionProgress,
+  ensurePlayerReputation,
   findNearbyNpcPairs,
+  getNpcRelationLabel,
+  getNpcRelationScore,
+  hydrateNpcRelations,
+  progressStoryArc,
   pushTownEvent,
+  rumorHotspots,
+  relationHintsForNpc,
   removePlayerFarm,
+  setPlayerDynamicMission,
+  setEconomyState,
+  setFactionState,
+  setWorldEvents,
+  setRumorState,
+  setRoutineNudges,
+  setStoryArc,
   setTownMission,
   snapshotWorld,
   tickClock,
@@ -67,6 +94,7 @@ const NPC_NPC_MAX_TURNS = 3;
 const NPC_NPC_TURN_DELAY_MS = 5000;
 const OVERNIGHT_SKIP_START_MINUTES = 2 * 60;
 const OVERNIGHT_SKIP_END_MINUTES = 6 * 60;
+const RELATIONSHIP_AI_COOLDOWN_MS = 18_000;
 let lastAutoDialogueAt = 0;
 let tickCount = 0;
 let npcConversationInProgress = false;
@@ -74,6 +102,8 @@ let npcConversationCancelRequested = false;
 let npcTaskInProgress = false;
 let autosaveInProgress = false;
 const persistedProfiles = new Map();
+const dailyFollowupHintCache = new Map();
+const relationshipAiGate = createCooldownGate({ maxKeys: 3000 });
 const TOWN_LIFE_TOPIC_HINTS = [
   "daily life in town",
   "work and personal mood today",
@@ -153,6 +183,134 @@ function formatMinutesClock(minutes) {
   return `${h12}:${String(mins).padStart(2, "0")} ${suffix}`;
 }
 
+function parseDurationMinutes(raw) {
+  const text = String(raw || "").trim().toLowerCase();
+  if (!text) return null;
+  const match = text.match(/^(\d+)\s*(hours?|hrs?|hr|minutes?|mins?|min)$/i);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const unit = String(match[2] || "").toLowerCase();
+  if (unit.startsWith("hour") || unit === "hr" || unit === "hrs") {
+    return amount * 60;
+  }
+  return amount;
+}
+
+function formatDurationLabel(durationMinutes) {
+  const mins = Math.max(1, Math.round(Number(durationMinutes) || 0));
+  if (mins % 60 === 0) {
+    const hours = mins / 60;
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  return `${mins} minute${mins === 1 ? "" : "s"}`;
+}
+
+function clockMomentToAbsolute(dayNumber, timeMinutes) {
+  const safeDay = Math.max(1, Number(dayNumber) || 1);
+  const safeMinute = ((Number(timeMinutes) || 0) % (24 * 60) + 24 * 60) % (24 * 60);
+  return (safeDay - 1) * 24 * 60 + safeMinute;
+}
+
+function absoluteToClockMoment(absoluteMinutes) {
+  const total = Math.max(0, Math.floor(Number(absoluteMinutes) || 0));
+  const dayNumber = Math.floor(total / (24 * 60)) + 1;
+  const timeMinutes = total % (24 * 60);
+  return { dayNumber, timeMinutes };
+}
+
+function addClockDuration(dayNumber, timeMinutes, deltaMinutes) {
+  const abs = clockMomentToAbsolute(dayNumber, timeMinutes);
+  return absoluteToClockMoment(abs + Math.max(0, Math.floor(Number(deltaMinutes) || 0)));
+}
+
+function looksLikeObservationQuestion(text) {
+  const normalized = cleanForMatch(text);
+  if (!normalized) return false;
+  if (
+    /\b(what did you see|what did you notice|what happened there|who was there|how did .* look|how was .* looking|give me your report)\b/i.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+  return /\b(saw|see|noticed|observe|observed|report|there)\b/i.test(normalized) && /\?/.test(String(text || ""));
+}
+
+function areaVisualSummary(areaName, minutes, weather) {
+  const hour = Math.floor((((minutes % (24 * 60)) + 24 * 60) % (24 * 60)) / 60);
+  const timeMood =
+    hour < 6 ? "quiet and dim" : hour < 12 ? "fresh and active" : hour < 17 ? "busy and sunlit" : hour < 21 ? "warm and lantern-lit" : "shadowy and hushed";
+  const weatherMood =
+    String(weather || "").toLowerCase() === "rain"
+      ? "Stones were slick with rain."
+      : String(weather || "").toLowerCase() === "storm"
+        ? "The wind made everything feel tense."
+        : "Air felt steady and clear.";
+  const byArea = {
+    "Town Square": `The square looked ${timeMood}, with banners and cobbles catching the light.`,
+    "Market Street": `Stalls and awnings looked ${timeMood}, colors shifting with passing shadows.`,
+    Dock: `The docks looked ${timeMood}, timber dark against the water.`,
+    Sanctum: `The sanctum looked ${timeMood}, pale stone holding a calm glow.`,
+    Forest: `The forest edge looked ${timeMood}, leaves moving in soft layers.`,
+    Housing: `The homes looked ${timeMood}, warm windows and tidy lanes.`
+  };
+  return `${byArea[areaName] || `That place looked ${timeMood}.`} ${weatherMood}`;
+}
+
+function crowdLabel(count) {
+  if (count <= 0) return "empty";
+  if (count <= 2) return "light";
+  if (count <= 4) return "steady";
+  return "busy";
+}
+
+function parseObservationMemory(memory) {
+  if (!memory || memory.memory_type !== "observation_report") return null;
+  const raw = String(memory.content || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function areaMentionFromText(text) {
+  const normalized = cleanForMatch(text);
+  if (!normalized) return null;
+  for (const area of AREAS) {
+    const areaName = cleanForMatch(area.name);
+    if (normalized.includes(areaName)) return area.name;
+  }
+  return null;
+}
+
+function buildObservationReplyLine(npc, report) {
+  const people = Array.isArray(report.peopleSeen) ? report.peopleSeen.slice(0, 4) : [];
+  const peopleText =
+    people.length > 0
+      ? `I spotted ${people.join(", ")} there.`
+      : "I didn't spot anyone I could name there.";
+  const detail = String(report.buildingLook || "").trim() || "Buildings looked ordinary, nothing damaged.";
+  const crowdText = `The place felt ${report.crowdLevel || "quiet"}.`;
+  const whenText =
+    report.endTimeLabel && report.endDayNumber
+      ? `At ${report.endTimeLabel} on day ${report.endDayNumber}`
+      : "When I watched";
+  const creativeByTrait = {
+    observant: "I kept close track of little shifts in mood.",
+    curious: "I watched longer than needed, chasing little details.",
+    vigilant: "I checked corners and movement patterns carefully.",
+    dramatic: "The scene had a strong mood, hard to ignore."
+  };
+  const traitKey = (npc?.traits || []).find((t) => Object.prototype.hasOwnProperty.call(creativeByTrait, t));
+  const creative = traitKey ? creativeByTrait[traitKey] : "I remember it clearly.";
+  return `${whenText}, in ${report.areaName}: ${peopleText} ${crowdText} ${detail} ${creative}`;
+}
+
 function parseNpcTaskCommand(text) {
   const raw = String(text || "").trim();
   if (!raw) return null;
@@ -168,15 +326,32 @@ function parseNpcTaskCommand(text) {
     };
   }
 
-  const observePattern =
-    /\b(?:observe|watch|check|patrol)(?:\s+(?:the\s+)?([a-zA-Z\s'.-]+?))?(?:\s+at\s+([a-zA-Z0-9:\s]+))?$/i;
-  const observeMatch = raw.match(observePattern);
+  const observeMatch = raw.match(/^(?:observe|watch|check|patrol)\s*(.*)$/i);
   if (observeMatch) {
-    const areaName = String(observeMatch[1] || "").trim();
+    let tail = String(observeMatch[1] || "").trim();
+    let atTimeText = "";
+    let durationMinutes = 60;
+
+    const durationMatch = tail.match(/\bfor\s+(\d+\s*(?:hours?|hrs?|hr|minutes?|mins?|min))\b/i);
+    if (durationMatch) {
+      durationMinutes = parseDurationMinutes(durationMatch[1]) || 60;
+      tail = `${tail.slice(0, durationMatch.index)} ${tail.slice((durationMatch.index || 0) + durationMatch[0].length)}`
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    const atMatch = tail.match(/\bat\s+([a-zA-Z0-9:\s]+)$/i);
+    if (atMatch) {
+      atTimeText = String(atMatch[1] || "").trim();
+      tail = tail.slice(0, atMatch.index).trim();
+    }
+
+    const areaName = tail.replace(/^the\s+/i, "").trim();
     return {
       type: "observe_area",
       areaName: areaName || "anywhere",
-      atTimeText: String(observeMatch[2] || "").trim()
+      atTimeText,
+      durationMinutes
     };
   }
 
@@ -208,14 +383,22 @@ function parseNpcMovementCommand(text) {
     return { type: "hold" };
   }
 
-  const goMatch = raw.match(/^(?:go|move|head|walk)\s+to\s+(.+)$/i);
+  const goMatch = raw.match(/^(?:go|move|head|walk)\s+to\s+(.+?)(?:\s+for\s+(\d+\s*(?:hours?|hrs?|hr|minutes?|mins?|min)))?$/i);
   if (goMatch) {
-    return { type: "go_area", areaName: goMatch[1].trim() };
+    return {
+      type: "go_area",
+      areaName: goMatch[1].trim(),
+      durationMinutes: parseDurationMinutes(goMatch[2])
+    };
   }
 
-  const patrolMatch = raw.match(/^patrol\s+(.+)$/i);
+  const patrolMatch = raw.match(/^patrol\s+(.+?)(?:\s+for\s+(\d+\s*(?:hours?|hrs?|hr|minutes?|mins?|min)))?$/i);
   if (patrolMatch) {
-    return { type: "patrol_area", areaName: patrolMatch[1].trim() };
+    return {
+      type: "patrol_area",
+      areaName: patrolMatch[1].trim(),
+      durationMinutes: parseDurationMinutes(patrolMatch[2])
+    };
   }
 
   return null;
@@ -327,21 +510,34 @@ function applyNpcMovementControl({ npc, player, parsed }) {
     if (!area) {
       return { ok: false, message: `Couldn't find area "${parsed.areaName}".` };
     }
+    let untilMinutes;
+    let untilDay;
+    if (Number.isFinite(parsed.durationMinutes) && parsed.durationMinutes > 0) {
+      const until = addClockDuration(world.dayNumber, world.timeMinutes, parsed.durationMinutes);
+      untilMinutes = until.timeMinutes;
+      untilDay = until.dayNumber;
+    }
     npc.moveControl = {
       mode: "area",
       areaName: area.name,
-      patrol: parsed.type === "patrol_area"
+      patrol: parsed.type === "patrol_area",
+      untilMinutes,
+      untilDay
     };
     npc.holdUntil = 0;
     if (!npc.moveControl.patrol) {
       npc.target = { x: area.x + area.w / 2, y: area.y + area.h / 2 };
     }
+    const durationText =
+      Number.isFinite(parsed.durationMinutes) && parsed.durationMinutes > 0
+        ? ` for ${formatDurationLabel(parsed.durationMinutes)} (until ${formatMinutesClock(untilMinutes)})`
+        : "";
     return {
       ok: true,
       message:
         parsed.type === "patrol_area"
-          ? `${npc.name} will patrol ${area.name}.`
-          : `${npc.name} is heading to ${area.name}.`
+          ? `${npc.name} will patrol ${area.name}${durationText}.`
+          : `${npc.name} is heading to ${area.name}${durationText}.`
     };
   }
 
@@ -397,6 +593,7 @@ function queueNpcTask({ npc, assignedByPlayerId, assignedByPlayerName, parsed })
       status: "pending",
       areaName: area ? area.name : null,
       atMinutes: Number.isFinite(atMinutes) ? atMinutes : null,
+      durationMinutes: Math.max(10, Math.min(6 * 60, Number(parsed.durationMinutes) || 60)),
       scheduleDay,
       assignedByPlayerId,
       assignedByPlayerName,
@@ -404,8 +601,9 @@ function queueNpcTask({ npc, assignedByPlayerId, assignedByPlayerName, parsed })
     };
     npc.tasks.push(task);
     const whenText = Number.isFinite(task.atMinutes) ? ` at ${formatMinutesClock(task.atMinutes)}` : " now";
+    const durationText = ` for ${formatDurationLabel(task.durationMinutes)}`;
     const areaLabel = area ? area.name : "around town";
-    return { ok: true, message: `${npc.name} will observe ${areaLabel}${whenText}.` };
+    return { ok: true, message: `${npc.name} will observe ${areaLabel}${whenText}${durationText}.` };
   }
 
   return { ok: false, error: "Unsupported task type." };
@@ -519,6 +717,7 @@ function captureConnectedPlayerProfile(player) {
     x: Number.isFinite(player.x) ? player.x : 680,
     y: Number.isFinite(player.y) ? player.y : 220,
     missionProgress: safeClone(player.missionProgress, null),
+    reputation: safeClone(player.reputation, null),
     farm: safeClone(farm, null)
   };
 }
@@ -540,6 +739,12 @@ function normalizeNpcForLoad(seedNpc, loadedNpc) {
   if (Number.isFinite(src.talkCooldownUntil)) next.talkCooldownUntil = src.talkCooldownUntil;
   if (Number.isFinite(src.holdUntil)) next.holdUntil = src.holdUntil;
   if (typeof src.area === "string" && src.area.trim()) next.area = src.area;
+  if (src.characterProfile && typeof src.characterProfile === "object") {
+    next.characterProfile = src.characterProfile;
+  }
+  if (src.routineState && typeof src.routineState === "object") {
+    next.routineState = src.routineState;
+  }
   if (src.target && Number.isFinite(src.target.x) && Number.isFinite(src.target.y)) {
     next.target = { x: src.target.x, y: src.target.y };
   }
@@ -564,6 +769,29 @@ async function loadAutosave() {
     if (data.townMission && typeof data.townMission === "object") {
       setTownMission(world, data.townMission);
     }
+    if (data.storyArc && typeof data.storyArc === "object") {
+      setStoryArc(world, data.storyArc);
+    }
+    if (data.worldEvents && typeof data.worldEvents === "object") {
+      setWorldEvents(world, data.worldEvents);
+    }
+    if (data.factions && typeof data.factions === "object") {
+      setFactionState(world, data.factions);
+    }
+    if (data.rumorState && typeof data.rumorState === "object") {
+      setRumorState(world, data.rumorState);
+    }
+    if (data.economy && typeof data.economy === "object") {
+      setEconomyState(world, data.economy);
+    }
+    if (data.routineNudges && typeof data.routineNudges === "object") {
+      const loadedNudges = Object.entries(data.routineNudges).map(([role, cfg]) => ({
+        role,
+        ...(cfg && typeof cfg === "object" ? cfg : {})
+      }));
+      setRoutineNudges(world, loadedNudges);
+    }
+    hydrateNpcRelations(world, data.npcRelations);
 
     const loadedNpcById = new Map((Array.isArray(data.npcs) ? data.npcs : []).map((n) => [n.id, n]));
     world.npcs = world.npcs.map((seedNpc) => normalizeNpcForLoad(seedNpc, loadedNpcById.get(seedNpc.id)));
@@ -614,6 +842,13 @@ async function saveAutosave() {
       dailyTownLog: world.dailyTownLog,
       yesterdayTownLog: world.yesterdayTownLog,
       townMission: safeClone(world.townMission, null),
+      storyArc: safeClone(world.storyArc, null),
+      worldEvents: safeClone(world.worldEvents, null),
+      factions: safeClone(world.factions, null),
+      rumorState: safeClone(world.rumorState, null),
+      economy: safeClone(world.economy, null),
+      routineNudges: safeClone(world.routineNudges, {}),
+      npcRelations: safeClone(world.npcRelations, {}),
       npcs: safeClone(world.npcs, []),
       farms: farmsObject,
       persistedProfiles: profilesObject
@@ -628,20 +863,215 @@ async function saveAutosave() {
   }
 }
 
-function applyMissionProgressAndNotify(socket, player, missionEvent) {
+async function applyAiNpcRelationshipShift({ speaker, target, lineText, contextHint }) {
+  if (!speaker || !target || !lineText) return null;
+  const shift = await analyzeRelationshipShiftWithGuard({
+    speaker: { name: speaker.name, role: speaker.role },
+    target: { name: target.name, role: target.role },
+    line: lineText,
+    contextHint
+  });
+  const delta = Number(shift?.delta) || 0;
+  if (!delta) return null;
+  return bumpNpcRelation(
+    world,
+    speaker.id,
+    target.id,
+    delta,
+    String(shift?.rationale || contextHint || "recent interaction")
+  );
+}
+
+function computeQuestSignals() {
+  const logs = [...(world.yesterdayTownLog || []), ...(world.dailyTownLog || [])].slice(-40);
+  const rumor = rumorHotspots(world);
+  const areaCounts = new Map();
+  const roleCounts = new Map();
+  const urgencyWords = ["tense", "restless", "fight", "storm", "shortage", "missing", "fear", "panic"];
+  let urgencyHits = 0;
+
+  for (const line of logs) {
+    const text = cleanForMatch(line);
+    for (const area of AREAS) {
+      const areaName = cleanForMatch(area.name);
+      if (text.includes(areaName)) {
+        areaCounts.set(area.name, (areaCounts.get(area.name) || 0) + 1);
+      }
+    }
+    for (const role of [...new Set(world.npcs.map((npc) => npc.role))]) {
+      const roleName = cleanForMatch(role);
+      if (text.includes(roleName)) {
+        roleCounts.set(role, (roleCounts.get(role) || 0) + 1);
+      }
+    }
+    for (const word of urgencyWords) {
+      if (text.includes(word)) urgencyHits += 1;
+    }
+  }
+
+  const logHotArea = [...areaCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+  const logHotRole = [...roleCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+  const hotArea = logHotArea || rumor.area || "";
+  const hotRole = logHotRole || rumor.role || "";
+  const urgencyFromLogs = urgencyHits >= 5 ? 3 : urgencyHits >= 2 ? 2 : 1;
+  const urgencyFromRumor = Number(rumor.intensity) >= 55 ? 3 : Number(rumor.intensity) >= 28 ? 2 : 1;
+  const urgency = Math.max(urgencyFromLogs, urgencyFromRumor);
+  return {
+    hotArea,
+    hotRole,
+    urgency,
+    rumorIntensity: Number(rumor.intensity) || 0,
+    rumorTopics: rumor.topics || [],
+    logSampleSize: logs.length
+  };
+}
+
+function normalizeDynamicMissionSpec(generated, signals = null) {
+  const objectiveType = String(generated?.objectiveType || "")
+    .trim()
+    .toLowerCase();
+  const validAreaNames = new Set(AREAS.map((a) => a.name));
+  const validRoles = [...new Set(world.npcs.map((npc) => npc.role))];
+  const missionBase = {
+    id: `dynamic_${world.dayNumber}_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    title: String(generated?.title || "Town Threads").slice(0, 60),
+    description: String(generated?.description || "Follow the latest town chatter.").slice(0, 180),
+    objectiveType,
+    urgency: Math.max(1, Math.min(3, Number(generated?.urgency) || Number(signals?.urgency) || 1)),
+    whyNow: String(generated?.whyNow || "").slice(0, 140)
+  };
+
+  if (objectiveType === "talk_npc") {
+    const npc = findNpcByNameLike(generated?.targetNpcName) || pickRandom(world.npcs);
+    return {
+      ...missionBase,
+      objectiveType: "talk_npc",
+      targetNpcId: npc?.id || "npc_guard",
+      title: missionBase.title || `Find ${npc?.name || "a townsfolk"}`
+    };
+  }
+  if (objectiveType === "talk_role") {
+    const requestedRole = String(generated?.targetRole || "").trim();
+    const signalRole = String(signals?.hotRole || "").trim();
+    const role =
+      validRoles.find((r) => cleanForMatch(r) === cleanForMatch(requestedRole)) ||
+      validRoles.find((r) => cleanForMatch(r) === cleanForMatch(signalRole)) ||
+      pickRandom(validRoles);
+    return {
+      ...missionBase,
+      objectiveType: "talk_role",
+      targetRole: role || "Town Guard"
+    };
+  }
+  if (objectiveType === "visit_area") {
+    const requestedArea = String(generated?.targetArea || "").trim();
+    const signalArea = String(signals?.hotArea || "").trim();
+    const areaName = validAreaNames.has(requestedArea)
+      ? requestedArea
+      : validAreaNames.has(signalArea)
+        ? signalArea
+        : pickRandom(AREAS)?.name || "Town Square";
+    return {
+      ...missionBase,
+      objectiveType: "visit_area",
+      targetArea: areaName
+    };
+  }
+  if (objectiveType === "harvest_count") {
+    return {
+      ...missionBase,
+      objectiveType: "harvest_count",
+      targetCount: Math.max(1, Math.min(5, Number(generated?.targetCount) || 2))
+    };
+  }
+  if (objectiveType === "visit_unique_areas") {
+    return {
+      ...missionBase,
+      objectiveType: "visit_unique_areas",
+      targetCount: Math.max(2, Math.min(5, Number(generated?.targetCount) || 3))
+    };
+  }
+  return {
+    ...missionBase,
+    objectiveType: "talk_unique_npcs",
+    targetCount: Math.max(2, Math.min(5, Number(generated?.targetCount) || 2))
+  };
+}
+
+async function assignDynamicMissionToPlayer(player) {
+  if (!player) return null;
+  const context = snapshotWorld(world);
+  const townLog = [...(world.yesterdayTownLog || []), ...(world.dailyTownLog || [])].slice(-30);
+  const npcs = world.npcs.map((npc) => ({
+    id: npc.id,
+    name: npc.name,
+    role: npc.role,
+    area: npc.area
+  }));
+  const areaNames = [...new Set(AREAS.map((a) => a.name))];
+  const roleNames = [...new Set(world.npcs.map((npc) => npc.role))];
+  const questSignals = computeQuestSignals();
+
+  let generated = null;
+  try {
+    generated = await dialogueService.generateStoryMission({
+      worldContext: context,
+      townLog,
+      npcs,
+      areaNames,
+      roleNames,
+      questSignals
+    });
+  } catch (err) {
+    console.error("dynamic mission generation error:", err.message);
+  }
+
+  const normalized = normalizeDynamicMissionSpec(generated, questSignals);
+  const urgencyMultiplier = normalized.urgency >= 3 ? 1.2 : normalized.urgency === 2 ? 1.1 : 1;
+  const baseReward = missionRewardCoins(world, normalized);
+  normalized.rewardCoins = Math.max(1, Math.round(baseReward * urgencyMultiplier));
+  const assigned = setPlayerDynamicMission(player, normalized);
+  refreshPersistedProfile(player);
+  return assigned;
+}
+
+async function applyMissionProgressAndNotify(socket, player, missionEvent) {
   if (!socket || !player || !missionEvent) return false;
   const result = applyMissionEvent(player, missionEvent);
   if (!result?.changed) return false;
 
   if (result.completedMission) {
-    const nextText = result.nextMission
-      ? ` Next: ${result.nextMission.title}.`
-      : " All mission steps complete.";
+    applyPlayerReputationDelta(player, {
+      delta: 2,
+      reason: `completed mission: ${result.completedMission.title || "objective"}`
+    });
+    const farm = world.farms.get(player.playerId);
+    const bonusCoins = Math.max(1, Number(result.completedMission?.rewardCoins) || missionRewardCoins(world, result.completedMission));
+    if (farm && bonusCoins > 0) {
+      farm.coins += bonusCoins;
+    }
+    const arcResult = progressStoryArc(world, String(result.completedMission?.objectiveType || ""));
+    let nextMission = result.nextMission;
+    const progress = ensurePlayerMissionProgress(player);
+    const baseChainComplete = progress.index >= MISSION_CHAIN.length;
+    if (!nextMission && baseChainComplete) {
+      nextMission = await assignDynamicMissionToPlayer(player);
+    }
+    const nextText = nextMission ? ` Next: ${nextMission.title}.` : " All mission steps complete.";
     socket.emit("farm_feedback", {
       ok: true,
-      message: `Mission complete: ${result.completedMission.title}.${nextText}`
+      message: `Mission complete: ${result.completedMission.title}. Reward: +${bonusCoins} coins.${nextText}`
     });
+    if (arcResult?.changed && arcResult.stageAdvanced) {
+      socket.emit("farm_feedback", {
+        ok: true,
+        message: arcResult.completed
+          ? `Story arc resolved: ${arcResult.arc?.title}. ${arcResult.arc?.branchOutcome || ""}`
+          : `Story arc advanced: ${arcResult.arc?.stages?.[arcResult.arc.stageIndex] || "Next chapter unlocked."}`
+      });
+    }
   }
+  refreshPersistedProfile(player);
   emitWorldToPlayer(socket.id, "world_tick");
   return true;
 }
@@ -813,13 +1243,28 @@ io.on("connection", (socket) => {
     waitingAnchorX: null,
     waitingAnchorY: null,
     connectedAt: Date.now(),
-    missionProgress: safeClone(restored?.missionProgress, null)
+    missionProgress: safeClone(restored?.missionProgress, null),
+    reputation: safeClone(restored?.reputation, null)
   });
   ensurePlayerMissionProgress(world.players.get(socket.id));
+  ensurePlayerReputation(world.players.get(socket.id));
   refreshPersistedProfile(world.players.get(socket.id));
   socket.emit("world_snapshot", snapshotWorld(world, socket.id));
+  const joinedPlayer = world.players.get(socket.id);
+  if (joinedPlayer) {
+    const missionProgress = ensurePlayerMissionProgress(joinedPlayer);
+    const needsDynamicMission =
+      missionProgress.index >= MISSION_CHAIN.length && !missionProgress.dynamicMission;
+    if (needsDynamicMission) {
+      assignDynamicMissionToPlayer(joinedPlayer)
+        .then(() => emitWorldToPlayer(socket.id, "world_tick"))
+        .catch((err) => {
+          console.error("join dynamic mission error:", err.message);
+        });
+    }
+  }
 
-  socket.on("player_move", (payload) => {
+  socket.on("player_move", async (payload) => {
     const player = world.players.get(socket.id);
     if (!player) return;
     const nextX = Number(payload?.x);
@@ -845,7 +1290,12 @@ io.on("connection", (socket) => {
     player.x = x;
     player.y = y;
     const areaName = areaNameAt(x, y);
-    const mainChanged = applyMissionProgressAndNotify(socket, player, { type: "move", x, y });
+    const mainChanged = await applyMissionProgressAndNotify(socket, player, {
+      type: "move",
+      x,
+      y,
+      areaName
+    });
     const townChanged = applyTownMissionProgressAndNotify(socket, player, {
       type: "move",
       x,
@@ -915,13 +1365,35 @@ io.on("connection", (socket) => {
 
         player.waitingForPlayerReply = false;
         const context = snapshotWorld(world, socket.id);
-        const line = await dialogueService.generateNpcLine({
-          speaker: npc,
-          target: { id: player.playerId, name: player.name || "Traveler", role: "Visitor", traits: [] },
-          worldContext: context,
-          memories: await getRecentMemories(db, npc.id, 4),
-          topicHint: `reply mostly to player message tone/topic: "${text}" (can occasionally pivot naturally)`
+        const memoryCache = createMemoryFetchCache();
+        const relationHints = relationHintsForNpc(world, npc.id, 2)
+          .map((r) => `${r.otherId}:${r.label}`)
+          .join(", ");
+        const continuity = await buildPersonalContinuityHint(npc, player, memoryCache);
+        const memoryCategory = await maybePersistPlayerMemoryEvent({
+          npc,
+          player,
+          playerText: text,
+          contextHint: `reply segment near ${npc.area}`
         });
+        await maybePersistResolutionFromPlayerText({
+          npc,
+          player,
+          playerText: text,
+          memoryCache
+        });
+        const line = looksLikeObservationQuestion(text)
+          ? await resolveObservationReply({ npc, player, text })
+          : await dialogueService.generateNpcLine({
+              speaker: npc,
+              target: { id: player.playerId, name: player.name || "Traveler", role: "Visitor", traits: [] },
+              worldContext: context,
+              memories: await memoryCache.recent(npc.id, 4),
+              topicHint:
+                `reply mostly to player message tone/topic: "${text}" (can occasionally pivot naturally). ` +
+                `social context: ${relationHints || "none"}. personal continuity: ${continuity}.` +
+                (memoryCategory ? ` latest player event: ${memoryCategory}.` : "")
+            });
 
         await writeMemory(db, {
           npcId: npc.id,
@@ -931,6 +1403,27 @@ io.on("connection", (socket) => {
           tags: `${npc.role},player,${player.playerId}`,
           createdAt: new Date().toISOString()
         });
+        await maybePersistResolutionFromNpcLine({
+          npc,
+          player,
+          npcLine: line.line,
+          memoryCache
+        });
+        const playerMoodShift = await analyzeRelationshipShiftWithGuard({
+          speaker: { name: npc.name, role: npc.role },
+          target: { name: player.name || "Traveler", role: "Visitor" },
+          line: line.line,
+          contextHint: `player chat response near ${npc.area}`
+        });
+        const playerDelta = Number(playerMoodShift?.delta) || 0;
+        if (playerDelta !== 0) {
+          await upsertRelationshipDelta(db, npc.id, player.playerId, playerDelta);
+          applyPlayerReputationDelta(player, {
+            role: npc.role,
+            delta: playerDelta,
+            reason: `dialogue tone with ${npc.name}`
+          });
+        }
 
         const chunks = splitDialogueToChunks(line.line);
         const firstChunk = chunks.shift() || line.line;
@@ -996,7 +1489,16 @@ io.on("connection", (socket) => {
 
       const dist = Math.hypot(npc.x - player.x, npc.y - player.y);
       if (dist > PLAYER_NEAR_DISTANCE) return;
-      applyMissionProgressAndNotify(socket, player, { type: "talk_npc", npcId: npc.id });
+      await applyMissionProgressAndNotify(socket, player, { type: "talk_npc", npcId: npc.id });
+      await applyMissionProgressAndNotify(socket, player, {
+        type: "talk_npc_role",
+        role: npc.role
+      });
+      applyPlayerReputationDelta(player, {
+        role: npc.role,
+        delta: 1,
+        reason: `talked with ${npc.name}`
+      });
       applyTownMissionProgressAndNotify(socket, player, {
         type: "talk_npc",
         npcId: npc.id
@@ -1007,6 +1509,7 @@ io.on("connection", (socket) => {
       });
 
       const context = snapshotWorld(world, socket.id);
+      const memoryCache = createMemoryFetchCache();
 
       if (!isContinuing) {
         await startPlayerDialogue({
@@ -1014,7 +1517,8 @@ io.on("connection", (socket) => {
           player,
           npc,
           context,
-          topicHint: `casual personal talk about ${pickRandom(TOWN_LIFE_TOPIC_HINTS)}`
+          topicHint: `casual personal talk about ${pickRandom(TOWN_LIFE_TOPIC_HINTS)}`,
+          memoryCache
         });
         return;
       }
@@ -1054,7 +1558,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("farm_action", (payload) => {
+  socket.on("farm_action", async (payload) => {
     const player = world.players.get(socket.id);
     const farmState = world.farms.get(player?.playerId);
     if (!player || !farmState || player.inDialogue) return;
@@ -1076,11 +1580,23 @@ io.on("connection", (socket) => {
 
     const result = applyFarmAction({ state: world, ownerId: player.playerId, action, plotId, cropType });
     socket.emit("farm_feedback", result);
+    if (result?.ok && action === "harvest") {
+      applyPlayerReputationDelta(player, {
+        role: "Shop Owner",
+        delta: 1,
+        reason: "supplied fresh harvest"
+      });
+      applyPlayerReputationDelta(player, {
+        role: "Fisherman",
+        delta: 1,
+        reason: "helped food supply"
+      });
+    }
     refreshPersistedProfile(player);
     const missionChanged =
       result?.ok && action === "harvest"
         ? [
-            applyMissionProgressAndNotify(socket, player, { type: "harvest_success" }),
+            await applyMissionProgressAndNotify(socket, player, { type: "harvest_success" }),
             applyTownMissionProgressAndNotify(socket, player, { type: "harvest_success" })
           ].some(Boolean)
         : false;
@@ -1120,6 +1636,139 @@ function sleep(ms) {
 
 function introLineForNpc(npc) {
   return `Welcome. I'm ${npc.name}, the town's ${npc.role.toLowerCase()}.`;
+}
+
+function createMemoryFetchCache() {
+  const cache = new Map();
+  return {
+    async recent(npcId, limit = 6) {
+      const key = `recent:${npcId}:${limit}`;
+      if (cache.has(key)) return cache.get(key);
+      const rows = await getRecentMemories(db, npcId, limit);
+      cache.set(key, rows);
+      return rows;
+    },
+    async byTag(npcId, tag, limit = 6) {
+      const key = `tag:${npcId}:${tag}:${limit}`;
+      if (cache.has(key)) return cache.get(key);
+      const rows = await getRecentMemoriesByTag(db, npcId, tag, limit);
+      cache.set(key, rows);
+      return rows;
+    }
+  };
+}
+
+function buildRelationshipAiGateKey({ speaker, target, contextHint }) {
+  const s = String(speaker?.id || speaker?.name || "").trim();
+  const t = String(target?.id || target?.name || "").trim();
+  const c = String(contextHint || "").slice(0, 80);
+  return `${s}|${t}|${c}`;
+}
+
+async function analyzeRelationshipShiftWithGuard({ speaker, target, line, contextHint }) {
+  const gateKey = buildRelationshipAiGateKey({ speaker, target, contextHint });
+  const allow = relationshipAiGate.allow(gateKey, RELATIONSHIP_AI_COOLDOWN_MS);
+  if (!allow) {
+    return { delta: 0, rationale: "cooldown" };
+  }
+  return dialogueService.analyzeRelationshipShift({ speaker, target, line, contextHint });
+}
+
+function playerTextResolvesPromise(text) {
+  const raw = String(text || "").toLowerCase();
+  if (!raw) return false;
+  return /\b(done|finished|completed|i did|as promised|i brought|kept my promise|delivered)\b/.test(raw);
+}
+
+function npcLineResolvesApology(text) {
+  const raw = String(text || "").toLowerCase();
+  if (!raw) return false;
+  return /\b(i forgive you|forgiven|apology accepted|we are good|it's alright|its alright)\b/.test(raw);
+}
+
+async function unresolvedThreadSummary(npc, player, memoryCache = null) {
+  if (!npc?.id || !player?.playerId) return { unresolvedCategories: [], prioritizedThreads: [] };
+  const rows = memoryCache
+    ? await memoryCache.byTag(npc.id, `player:${player.playerId}`, 14)
+    : await getRecentMemoriesByTag(db, npc.id, `player:${player.playerId}`, 14);
+  return buildFollowupMemoryContext(rows, 6);
+}
+
+async function maybePersistResolutionFromPlayerText({ npc, player, playerText, memoryCache = null }) {
+  if (!npc?.id || !player?.playerId || !playerTextResolvesPromise(playerText)) return false;
+  const summary = await unresolvedThreadSummary(npc, player, memoryCache);
+  if (!summary.unresolvedCategories.includes("promise")) return false;
+  await writeMemory(db, {
+    npcId: npc.id,
+    type: "player_commitment",
+    content: `Promise resolved: ${String(playerText || "").slice(0, 140)}`,
+    importance: 6,
+    tags: `${npc.role},player:${player.playerId},category:promise_resolved`,
+    createdAt: new Date().toISOString()
+  });
+  return true;
+}
+
+async function maybePersistResolutionFromNpcLine({ npc, player, npcLine, memoryCache = null }) {
+  if (!npc?.id || !player?.playerId || !npcLineResolvesApology(npcLine)) return false;
+  const summary = await unresolvedThreadSummary(npc, player, memoryCache);
+  if (!summary.unresolvedCategories.includes("apology")) return false;
+  await writeMemory(db, {
+    npcId: npc.id,
+    type: "player_commitment",
+    content: `Apology resolved: ${String(npcLine || "").slice(0, 140)}`,
+    importance: 6,
+    tags: `${npc.role},player:${player.playerId},category:apology_resolved`,
+    createdAt: new Date().toISOString()
+  });
+  return true;
+}
+
+async function getDailyFollowupHint(npc, player, memoryCache = null) {
+  return getOrCreateDailyFollowupHint({
+    cache: dailyFollowupHintCache,
+    dayNumber: world.dayNumber,
+    npc,
+    player,
+    getMemoriesByTag: (npcId, tag, limit) =>
+      memoryCache ? memoryCache.byTag(npcId, tag, limit) : getRecentMemoriesByTag(db, npcId, tag, limit),
+    generateFollowup: (payload) => dialogueService.generateNextDayFollowup(payload),
+    worldContext: snapshotWorld(world),
+    townLog: world.yesterdayTownLog || []
+  });
+}
+
+async function buildPersonalContinuityHint(npc, player, memoryCache = null) {
+  if (!npc || !player?.playerId) return "none";
+  const memories = memoryCache
+    ? await memoryCache.byTag(npc.id, `player:${player.playerId}`, 6)
+    : await getRecentMemoriesByTag(db, npc.id, `player:${player.playerId}`, 6);
+  const compact = compactMemoryLines(memories, 5).slice(0, 4);
+  const followup = await getDailyFollowupHint(npc, player, memoryCache);
+  return composeContinuityHint({ followup, memoryLines: compact, maxLen: 360 });
+}
+
+async function maybePersistPlayerMemoryEvent({ npc, player, playerText, contextHint }) {
+  if (!npc || !player?.playerId) return null;
+  const classified = await dialogueService.classifyPlayerMemoryEvent({
+    playerText,
+    npcName: npc.name,
+    contextHint
+  });
+  const category = String(classified?.category || "none");
+  if (category === "none") return null;
+  const summary = String(classified?.summary || "").trim();
+  if (!summary) return null;
+
+  await writeMemory(db, {
+    npcId: npc.id,
+    type: "player_commitment",
+    content: summary,
+    importance: Math.max(1, Math.min(9, Number(classified?.importance) || 4)),
+    tags: `${npc.role},player:${player.playerId},category:${category}`,
+    createdAt: new Date().toISOString()
+  });
+  return category;
 }
 
 function buildMorningSummary(state) {
@@ -1164,10 +1813,154 @@ async function refreshTownMission() {
   }
 }
 
+async function refreshStoryArc() {
+  const context = snapshotWorld(world);
+  const areaNames = [...new Set(world.npcs.map((npc) => npc.area))];
+  const roleNames = [...new Set(world.npcs.map((npc) => npc.role))];
+
+  try {
+    const generated = await dialogueService.generateStoryArc({
+      worldContext: context,
+      townLog: [...(world.yesterdayTownLog || []), ...(world.dailyTownLog || [])].slice(-30),
+      areaNames,
+      roleNames
+    });
+    setStoryArc(world, {
+      ...generated,
+      id: `arc_${world.dayNumber}_${Date.now()}`,
+      stageIndex: 0,
+      stageProgress: 0,
+      stageTarget: 2,
+      completed: false,
+      branchOutcome: ""
+    });
+  } catch (err) {
+    console.error("story arc generation error:", err.message);
+    setStoryArc(world, null);
+  }
+}
+
+async function refreshRoutineNudges() {
+  const context = snapshotWorld(world);
+  try {
+    const nudges = await dialogueService.generateRoutineNudges({
+      worldContext: context,
+      townLog: [...(world.yesterdayTownLog || []), ...(world.dailyTownLog || [])].slice(-30),
+      roleNames: [...new Set(world.npcs.map((npc) => npc.role))],
+      areaNames: [...new Set(world.npcs.map((npc) => npc.area))]
+    });
+    setRoutineNudges(world, nudges);
+  } catch (err) {
+    console.error("routine nudge generation error:", err.message);
+    setRoutineNudges(world, []);
+  }
+}
+
+async function refreshEconomy() {
+  const context = snapshotWorld(world);
+  try {
+    const plan = await dialogueService.generateEconomyPlan({
+      worldContext: context,
+      townLog: [...(world.yesterdayTownLog || []), ...(world.dailyTownLog || [])].slice(-30),
+      cropTypes: ["turnip", "carrot", "pumpkin"]
+    });
+    setEconomyState(world, plan);
+  } catch (err) {
+    console.error("economy generation error:", err.message);
+    setEconomyState(world, null);
+  }
+}
+
+async function refreshWorldEvents() {
+  const context = snapshotWorld(world);
+  try {
+    const generated = await dialogueService.generateWorldEvents({
+      worldContext: context,
+      townLog: [...(world.yesterdayTownLog || []), ...(world.dailyTownLog || [])].slice(-30),
+      areaNames: [...new Set(AREAS.map((a) => a.name))]
+    });
+    const events = setWorldEvents(world, generated) || { active: [] };
+
+    let weatherShifted = false;
+    let economyBoost = 1;
+    for (const evt of events.active || []) {
+      if (evt.effect === "weather_shift" && !weatherShifted) {
+        world.weather = world.weather === "clear" ? "rain" : "clear";
+        weatherShifted = true;
+      }
+      if (evt.effect === "price_spike") {
+        economyBoost += 0.04 * evt.severity;
+      }
+      if (evt.effect === "guard_alert") {
+        world.rumorOfTheDay = `${world.rumorOfTheDay} Guard alert near ${evt.area || "town center"}.`.slice(0, 180);
+      }
+      pushTownEvent(world, `Event: ${evt.title} (${evt.area || "town"}) - ${evt.description}`);
+    }
+    if (economyBoost > 1) {
+      setEconomyState(world, {
+        ...world.economy,
+        missionRewardMultiplier: Math.max(0.75, Math.min(1.35, (Number(world.economy?.missionRewardMultiplier) || 1) * economyBoost)),
+        note: `Events are affecting supply lines (${events.active.length} active).`
+      });
+    }
+  } catch (err) {
+    console.error("world event generation error:", err.message);
+    setWorldEvents(world, { active: [] });
+  }
+}
+
+async function refreshFactionPulse() {
+  const context = snapshotWorld(world);
+  try {
+    const pulse = await dialogueService.generateFactionPulse({
+      worldContext: context,
+      townLog: [...(world.yesterdayTownLog || []), ...(world.dailyTownLog || [])].slice(-30),
+      factions: world.factions
+    });
+    setFactionState(world, pulse);
+  } catch (err) {
+    console.error("faction pulse generation error:", err.message);
+    setFactionState(world, world.factions || null);
+  }
+}
+
+function dynamicMissionHasProgress(player) {
+  const progress = ensurePlayerMissionProgress(player);
+  return progress.harvestCount > 0 || progress.spokenNpcIds.length > 0 || progress.spokenRoles.length > 0 || progress.visitedAreas.length > 0;
+}
+
+async function refreshReactiveMissionsForOnlinePlayers() {
+  const tasks = [];
+  for (const player of world.players.values()) {
+    const progress = ensurePlayerMissionProgress(player);
+    const inDynamicMode = progress.index >= MISSION_CHAIN.length;
+    if (!inDynamicMode) continue;
+    const needsNew = !progress.dynamicMission || !dynamicMissionHasProgress(player);
+    if (!needsNew) continue;
+    tasks.push(assignDynamicMissionToPlayer(player));
+  }
+  if (tasks.length === 0) return;
+  await Promise.allSettled(tasks);
+}
+
 function runMorningReset(reason = "new_day") {
   const summary = buildMorningSummary(world);
-  refreshTownMission().then(() => {
-    emitWorldToAllPlayers("world_tick");
+  runDailyRefreshPipeline({
+    clearCaches: () => {
+      dailyFollowupHintCache.clear();
+      relationshipAiGate.clear();
+    },
+    shouldRefreshStoryArc: !world.storyArc || world.storyArc.completed,
+    refreshStoryArc,
+    refreshTownMission,
+    refreshRoutineNudges,
+    refreshEconomy,
+    refreshWorldEvents,
+    refreshFactionPulse,
+    refreshReactiveMissions: refreshReactiveMissionsForOnlinePlayers,
+    onStepDone: () => {
+      emitWorldToAllPlayers("world_tick");
+    }
   });
   for (const [socketId, player] of world.players.entries()) {
     const farm = world.farms.get(player.playerId);
@@ -1293,9 +2086,37 @@ function isObserveTaskReady(task) {
   return world.timeMinutes >= task.atMinutes;
 }
 
+async function resolveObservationReply({ npc, player, text }) {
+  const memories = await getRecentMemories(db, npc.id, 30);
+  const askedArea = areaMentionFromText(text);
+  const reports = memories
+    .filter((m) => m.memory_type === "observation_report")
+    .filter((m) => String(m.tags || "").includes(`player:${player.playerId}`))
+    .map((m) => ({ memory: m, report: parseObservationMemory(m) }))
+    .filter((item) => item.report && item.report.areaName);
+  const areaFiltered = askedArea ? reports.filter((item) => item.report.areaName === askedArea) : reports;
+  const candidates = areaFiltered.length > 0 ? areaFiltered : reports;
+  if (candidates.length === 0) {
+    return {
+      line: "I haven't finished any scouting report for you yet.",
+      emotion: "neutral",
+      memoryWrite: `${npc.name} admitted they had no completed scouting report yet.`
+    };
+  }
+
+  candidates.sort((a, b) => new Date(b.memory.created_at).getTime() - new Date(a.memory.created_at).getTime());
+  const best = candidates[0].report;
+  return {
+    line: buildObservationReplyLine(npc, best),
+    emotion: "focused",
+    memoryWrite: `${npc.name} reported observations from ${best.areaName} to ${player.name}.`
+  };
+}
+
 async function maybeProcessNpcTasks() {
   if (npcTaskInProgress || npcConversationInProgress || anyPlayerInDialogue()) return false;
   const now = Date.now();
+  const memoryCache = createMemoryFetchCache();
 
   for (const npc of world.npcs) {
     cleanupNpcTasks(npc);
@@ -1305,23 +2126,17 @@ async function maybeProcessNpcTasks() {
     if (task.type === "observe_area") {
       if (!isObserveTaskReady(task)) continue;
       task.status = "in_progress";
-      if (!task.areaName) {
-        task.status = "completed";
-        cleanupNpcTasks(npc);
-        const atText = Number.isFinite(task.atMinutes) ? ` at ${formatMinutesClock(task.atMinutes)}` : "";
-        pushTownEvent(world, `${npc.name} observed ${npc.area}${atText} and took mental notes.`);
-        notifyPlayerByPlayerId(
-          task.assignedByPlayerId,
-          `${npc.name} finished observing around town${atText}.`,
-          true
-        );
-        return true;
-      }
-
-      const area = AREAS.find((a) => a.name === task.areaName);
+      npc.routineState = {
+        phase: "task_observe",
+        venueType: "observe",
+        areaName: task.areaName || npc.area,
+        isHoliday: false
+      };
+      const targetAreaName = task.areaName || npc.area;
+      const area = AREAS.find((a) => a.name === targetAreaName);
       if (!area) {
         task.status = "failed";
-        notifyPlayerByPlayerId(task.assignedByPlayerId, `${npc.name} could not find ${task.areaName}.`, false);
+        notifyPlayerByPlayerId(task.assignedByPlayerId, `${npc.name} could not find ${targetAreaName}.`, false);
         cleanupNpcTasks(npc);
         return true;
       }
@@ -1334,13 +2149,58 @@ async function maybeProcessNpcTasks() {
         return false;
       }
 
+      const nowAbs = clockMomentToAbsolute(world.dayNumber, world.timeMinutes);
+      if (!Number.isFinite(task.observeStartedAtAbs)) {
+        task.observeStartedAtAbs = nowAbs;
+        task.observeStartedDay = world.dayNumber;
+        task.observeStartedMinutes = world.timeMinutes;
+        return false;
+      }
+
+      const plannedDuration = Math.max(10, Number(task.durationMinutes) || 60);
+      const elapsed = nowAbs - task.observeStartedAtAbs;
+      if (elapsed < plannedDuration) {
+        npc.target = {
+          x: area.x + area.w / 2 + (Math.random() * 24 - 12),
+          y: area.y + area.h / 2 + (Math.random() * 24 - 12)
+        };
+        return false;
+      }
+
+      const seenNpcs = world.npcs
+        .filter((other) => other.id !== npc.id && other.area === area.name)
+        .slice(0, 6);
+      const peopleSeen = seenNpcs.map((other) => `${other.name} (${other.role})`);
+      const buildingLook = areaVisualSummary(area.name, world.timeMinutes, world.weather);
+      const report = {
+        areaName: area.name,
+        startDayNumber: task.observeStartedDay || world.dayNumber,
+        startTimeLabel: formatMinutesClock(task.observeStartedMinutes),
+        endDayNumber: world.dayNumber,
+        endTimeLabel: formatMinutesClock(world.timeMinutes),
+        durationMinutes: plannedDuration,
+        weather: world.weather,
+        crowdLevel: crowdLabel(seenNpcs.length),
+        peopleSeen,
+        buildingLook
+      };
+
+      await writeMemory(db, {
+        npcId: npc.id,
+        type: "observation_report",
+        content: JSON.stringify(report),
+        importance: 6,
+        tags: `observation,${area.name},player:${task.assignedByPlayerId}`,
+        createdAt: new Date().toISOString()
+      });
       task.status = "completed";
       cleanupNpcTasks(npc);
       const atText = Number.isFinite(task.atMinutes) ? ` at ${formatMinutesClock(task.atMinutes)}` : "";
-      pushTownEvent(world, `${npc.name} observed ${area.name}${atText} and took mental notes.`);
+      const durationText = formatDurationLabel(plannedDuration);
+      pushTownEvent(world, `${npc.name} observed ${area.name}${atText} for ${durationText} and took mental notes.`);
       notifyPlayerByPlayerId(
         task.assignedByPlayerId,
-        `${npc.name} finished observing ${area.name}${atText}.`,
+        `${npc.name} finished observing ${area.name}${atText} for ${durationText}. Ask what they saw.`,
         true
       );
       return true;
@@ -1358,6 +2218,12 @@ async function maybeProcessNpcTasks() {
       const dist = Math.hypot(npc.x - target.x, npc.y - target.y);
       if (dist > 120) {
         task.status = "in_progress";
+        npc.routineState = {
+          phase: "task_talk",
+          venueType: "talk",
+          areaName: target.area || npc.area,
+          isHoliday: false
+        };
         npc.target = { x: target.x, y: target.y };
         return false;
       }
@@ -1372,7 +2238,7 @@ async function maybeProcessNpcTasks() {
           speaker: npc,
           target,
           worldContext: context,
-          memories: await getRecentMemories(db, npc.id, 4),
+          memories: await memoryCache.recent(npc.id, 4),
           topicHint: `player-requested topic from ${task.assignedByPlayerName || "player"}: ${task.topic}`
         });
 
@@ -1425,7 +2291,7 @@ async function maybeProcessNpcTasks() {
   return false;
 }
 
-async function startPlayerDialogue({ socket, player, npc, context, topicHint }) {
+async function startPlayerDialogue({ socket, player, npc, context, topicHint, memoryCache = null }) {
   player.inDialogue = true;
   player.dialogueNpcId = npc.id;
   player.dialogueTurns = 0;
@@ -1450,12 +2316,18 @@ async function startPlayerDialogue({ socket, player, npc, context, topicHint }) 
       createdAt: new Date().toISOString()
     });
   } else {
+    const relationHints = relationHintsForNpc(world, npc.id, 2)
+      .map((r) => `${r.otherId}:${r.label}`)
+      .join(", ");
+    const continuity = await buildPersonalContinuityHint(npc, player, memoryCache);
     linePayload = await dialogueService.generateNpcLine({
       speaker: npc,
       target: { id: player.playerId, name: player.name || "Traveler", role: "Visitor", traits: [] },
       worldContext: context,
-      memories: await getRecentMemories(db, npc.id, 4),
-      topicHint: topicHint || `casual personal talk about ${pickRandom(TOWN_LIFE_TOPIC_HINTS)}`
+      memories: memoryCache ? await memoryCache.recent(npc.id, 4) : await getRecentMemories(db, npc.id, 4),
+      topicHint:
+        topicHint ||
+        `casual personal talk about ${pickRandom(TOWN_LIFE_TOPIC_HINTS)}. social context: ${relationHints || "none"}. personal continuity: ${continuity}.`
     });
   }
 
@@ -1487,7 +2359,19 @@ async function startPlayerDialogue({ socket, player, npc, context, topicHint }) 
     tags: `${npc.role},player,${player.playerId}`,
     createdAt: new Date().toISOString()
   });
-  await upsertRelationshipDelta(db, npc.id, player.playerId, 1);
+  const introShift = await analyzeRelationshipShiftWithGuard({
+    speaker: { name: npc.name, role: npc.role },
+    target: { name: player.name || "Traveler", role: "Visitor" },
+    line: linePayload.line,
+    contextHint: `first-contact interaction near ${npc.area}`
+  });
+  const introDelta = Number(introShift?.delta);
+  await upsertRelationshipDelta(db, npc.id, player.playerId, Number.isFinite(introDelta) ? introDelta : 1);
+  applyPlayerReputationDelta(player, {
+    role: npc.role,
+    delta: Number.isFinite(introDelta) ? introDelta : 1,
+    reason: `first impression with ${npc.name}`
+  });
   pushTownEvent(world, `${npc.name} met with ${player.name} near ${npc.area}.`);
   npc.talkCooldownUntil = Date.now() + NPC_COOLDOWN_MS;
   lastAutoDialogueAt = Date.now();
@@ -1511,7 +2395,18 @@ async function maybeTriggerNpcConversation() {
   );
   if (pairs.length === 0) return;
 
-  const pair = pairs[Math.floor(Math.random() * Math.min(3, pairs.length))];
+  const weightedPairs = pairs.map((pair) => {
+    const rel = getNpcRelationScore(world, pair.a.id, pair.b.id);
+    const relationWeight = rel <= -7 ? 0.2 : rel <= -4 ? 0.6 : rel >= 6 ? 1.4 : rel >= 3 ? 1.2 : 1;
+    const distanceWeight = 1 / Math.max(1, pair.dist);
+    return {
+      pair,
+      score: relationWeight * distanceWeight * 100
+    };
+  });
+  weightedPairs.sort((x, y) => y.score - x.score);
+  const top = weightedPairs.slice(0, Math.min(5, weightedPairs.length));
+  const pair = (top[Math.floor(Math.random() * top.length)] || weightedPairs[0]).pair;
   const { a, b } = pair;
   if (a.talkCooldownUntil > now || b.talkCooldownUntil > now) return;
   npcConversationInProgress = true;
@@ -1521,6 +2416,7 @@ async function maybeTriggerNpcConversation() {
   let target = speaker.id === a.id ? b : a;
   let previousLine = "";
   const context = snapshotWorld(world);
+  const memoryCache = createMemoryFetchCache();
   const turns =
     NPC_NPC_MIN_TURNS + Math.floor(Math.random() * (NPC_NPC_MAX_TURNS - NPC_NPC_MIN_TURNS + 1));
 
@@ -1531,10 +2427,12 @@ async function maybeTriggerNpcConversation() {
         speaker,
         target,
         worldContext: context,
-        memories: await getRecentMemories(db, speaker.id, 4),
+        memories: await memoryCache.recent(speaker.id, 4),
         topicHint:
           i === 0
-            ? `casual NPC-to-NPC talk about ${pickRandom(TOWN_LIFE_TOPIC_HINTS)}`
+            ? `casual NPC-to-NPC talk about ${pickRandom(TOWN_LIFE_TOPIC_HINTS)}. current relation=${getNpcRelationLabel(
+                getNpcRelationScore(world, speaker.id, target.id)
+              )}`
             : `reply to ${target.name} naturally: "${previousLine}"`
       });
 
@@ -1557,6 +2455,12 @@ async function maybeTriggerNpcConversation() {
         importance: 4,
         tags: `${speaker.role},${target.role}`,
         createdAt: new Date().toISOString()
+      });
+      await applyAiNpcRelationshipShift({
+        speaker,
+        target,
+        lineText: line.line,
+        contextHint: `npc conversation near ${speaker.area}`
       });
       pushTownEvent(world, `${speaker.name} and ${target.name} exchanged updates near ${speaker.area}.`);
 
@@ -1630,6 +2534,13 @@ async function boot() {
   await ensureSchema(db);
   await loadAutosave();
   await refreshTownMission();
+  await refreshEconomy();
+  await refreshWorldEvents();
+  await refreshFactionPulse();
+  await refreshRoutineNudges();
+  if (!world.storyArc || world.storyArc.completed) {
+    await refreshStoryArc();
+  }
   setInterval(() => {
     saveAutosave();
   }, AUTOSAVE_INTERVAL_MS);

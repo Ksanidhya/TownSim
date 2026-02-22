@@ -35,8 +35,12 @@
       <div class="chip" id="player-profile">Player: Traveler (unspecified)</div>
       <div class="chip" id="clock">8:00 AM</div>
       <div class="chip" id="weather">clear</div>
+      <div class="chip" id="economy">Market: ...</div>
+      <div class="chip rumor" id="world-events">Events: none</div>
+      <div class="chip rumor" id="factions">Factions: ...</div>
       <div class="chip rumor" id="mission">Mission: ...</div>
       <div class="chip rumor" id="town-mission">Town Gossip Mission: ...</div>
+      <div class="chip rumor" id="story-arc">Story Arc: ...</div>
       <div id="chat-controls">
         <input id="chat-input" type="text" maxlength="240" placeholder="Say something..." />
         <button id="chat-send" type="button">Send</button>
@@ -48,7 +52,7 @@
         <div id="news-text"></div>
         <div id="news-hint">Click or press Enter/Space to close</div>
       </div>
-      <div id="farm-panel">
+      <div id="farm-panel" class="hidden">
         <div id="farm-title">Home Farm</div>
         <div class="farm-chip" id="farm-selected">Plot: none</div>
         <div class="farm-chip" id="farm-coins">Coins: 0</div>
@@ -59,11 +63,12 @@
             <option value="carrot">Carrot</option>
             <option value="pumpkin">Pumpkin</option>
           </select>
-          <button id="farm-sow" type="button">Sow</button>
-          <button id="farm-water" type="button">Water</button>
-          <button id="farm-harvest" type="button">Harvest</button>
+          <button id="farm-sow" type="button" class="farm-tool-btn">Tool: Sow</button>
+          <button id="farm-water" type="button" class="farm-tool-btn">Tool: Water</button>
+          <button id="farm-harvest" type="button" class="farm-tool-btn">Tool: Harvest</button>
+          <button id="farm-unselect" type="button" class="farm-tool-btn">Unselect Plot</button>
         </div>
-        <div id="farm-hint">Move near your home field, click a plot, then use actions.</div>
+        <div id="farm-hint">Move near your home field to reveal tools. Click a plot first.</div>
         <div id="farm-feedback">No farm updates yet.</div>
       </div>
     </aside>

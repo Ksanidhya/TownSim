@@ -8,7 +8,7 @@ export const AREAS = [
   { name: "Dock", x: 1180, y: 760, w: 340, h: 300 },
   { name: "Sanctum", x: 1060, y: 160, w: 280, h: 220 },
   { name: "Forest", x: 120, y: 760, w: 360, h: 320 },
-  { name: "Housing", x: 520, y: 120, w: 420, h: 240 }
+  { name: "Housing", x: 470, y: 80, w: 530, h: 330 }
 ];
 
 export const NPC_SEEDS = [
