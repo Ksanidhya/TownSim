@@ -259,6 +259,30 @@ button:focus-visible,
   pointer-events: auto;
 }
 
+#view-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  pointer-events: auto;
+}
+
+#view-controls label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #d5e3df;
+}
+
+#view-mode-select {
+  font: inherit;
+  border-radius: 10px;
+  border: 1px solid var(--chip-border);
+  color: var(--text);
+  background: rgba(12, 22, 25, 0.9);
+  padding: 8px 10px;
+}
+
 #chat-input {
   flex: 1;
   min-width: 160px;
@@ -335,6 +359,121 @@ button:focus-visible,
 #news-hint {
   margin-top: 8px;
   color: var(--muted);
+}
+
+#mobile-controls {
+  position: fixed;
+  inset: auto 10px 10px 10px;
+  z-index: 120;
+  display: none;
+  justify-content: space-between;
+  align-items: end;
+  pointer-events: none;
+}
+
+#mobile-dpad {
+  width: 162px;
+  height: 162px;
+  display: grid;
+  grid-template-columns: 54px 54px 54px;
+  grid-template-rows: 54px 54px 54px;
+  grid-template-areas:
+    ". up ."
+    "left . right"
+    ". down .";
+  gap: 0;
+  pointer-events: auto;
+}
+
+#m-up { grid-area: up; }
+#m-left { grid-area: left; }
+#m-down { grid-area: down; }
+#m-right { grid-area: right; }
+
+#mobile-actions {
+  display: grid;
+  gap: 10px;
+  pointer-events: auto;
+  justify-items: end;
+}
+
+.m-btn {
+  font: inherit;
+  border-radius: 12px;
+  border: 1px solid var(--chip-border);
+  color: #f6f4e9;
+  background: rgba(8, 14, 19, 0.78);
+  min-width: 54px;
+  min-height: 54px;
+  padding: 10px 12px;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.m-btn.action {
+  min-width: 118px;
+  min-height: 54px;
+}
+
+#mobile-chat-menu {
+  display: grid;
+  gap: 6px;
+}
+
+#mobile-chat-menu.hidden {
+  display: none;
+}
+
+.m-chat-option {
+  font: inherit;
+  border-radius: 10px;
+  border: 1px solid var(--chip-border);
+  color: #f6f4e9;
+  background: rgba(8, 14, 19, 0.88);
+  min-width: 118px;
+  min-height: 40px;
+  padding: 8px 10px;
+  text-align: left;
+  touch-action: manipulation;
+}
+
+.m-chat-option:active {
+  background: rgba(25, 37, 47, 0.92);
+  border-color: rgba(241, 207, 117, 0.72);
+}
+
+.m-btn:active,
+.m-btn.active {
+  background: rgba(25, 37, 47, 0.92);
+  border-color: rgba(241, 207, 117, 0.72);
+}
+
+body[data-view-mode="mobile"] #mobile-controls {
+  display: flex;
+}
+
+body[data-view-mode="mobile"] #hud {
+  width: calc(100vw - 12px);
+  left: 6px;
+  top: 6px;
+  padding: 7px;
+}
+
+body[data-view-mode="mobile"] .chip {
+  margin: 0 6px 6px 0;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+body[data-view-mode="mobile"] #chat-controls,
+body[data-view-mode="mobile"] #farm-controls,
+body[data-view-mode="mobile"] #view-controls {
+  flex-wrap: wrap;
+}
+
+body[data-view-mode="mobile"] #chat-input {
+  min-width: 100%;
 }
 
 @media (max-width: 768px) {

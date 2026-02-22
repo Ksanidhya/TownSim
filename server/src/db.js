@@ -18,9 +18,14 @@ export function initDb() {
     throw new Error("DATABASE_URL is required. Set it in server/.env.");
   }
 
+  const renderDetected = String(process.env.RENDER || "").toLowerCase() === "true";
+  const forceIpv4 =
+    process.env.PG_FORCE_IPV4 === "true" || (process.env.PG_FORCE_IPV4 !== "false" && renderDetected);
+
   const pool = new Pool({
     connectionString,
-    ssl: buildSslConfig(connectionString)
+    ssl: buildSslConfig(connectionString),
+    ...(forceIpv4 ? { family: 4 } : {})
   });
 
   return pool;

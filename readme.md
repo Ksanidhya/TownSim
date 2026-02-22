@@ -43,7 +43,10 @@ Copy-Item client/.env.example client/.env
 OPENAI_API_KEY=your_key_here
 DATABASE_URL=postgresql://postgres:[YOUR-PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres
 PG_SSL=true
+PG_FORCE_IPV4=true
 ```
+
+`PG_FORCE_IPV4=true` is recommended on Render when Postgres hostname resolution returns IPv6 and deploy logs show `ENETUNREACH`.
 
 4. Start both:
 ```powershell

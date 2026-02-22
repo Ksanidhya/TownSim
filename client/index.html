@@ -41,6 +41,15 @@
       <div class="chip rumor" id="mission">Mission: ...</div>
       <div class="chip rumor" id="town-mission">Town Gossip Mission: ...</div>
       <div class="chip rumor" id="story-arc">Story Arc: ...</div>
+      <div id="view-controls">
+        <label for="view-mode-select">View</label>
+        <select id="view-mode-select">
+          <option value="auto">Auto</option>
+          <option value="desktop">Desktop</option>
+          <option value="mobile">Mobile</option>
+        </select>
+        <span class="chip" id="view-mode-active">Mode: auto</span>
+      </div>
       <div id="chat-controls">
         <input id="chat-input" type="text" maxlength="240" placeholder="Say something..." />
         <button id="chat-send" type="button">Send</button>
@@ -72,6 +81,23 @@
         <div id="farm-feedback">No farm updates yet.</div>
       </div>
     </aside>
+    <div id="mobile-controls" aria-label="mobile controls">
+      <div id="mobile-dpad">
+        <button type="button" class="m-btn" id="m-up">▲</button>
+        <button type="button" class="m-btn" id="m-left">◀</button>
+        <button type="button" class="m-btn" id="m-down">▼</button>
+        <button type="button" class="m-btn" id="m-right">▶</button>
+      </div>
+      <div id="mobile-actions">
+        <button type="button" class="m-btn action" id="m-use">Use / Talk</button>
+        <button type="button" class="m-btn action" id="m-chat">Quick Chat</button>
+        <div id="mobile-chat-menu" class="hidden">
+          <button type="button" class="m-chat-option" data-chat="Hello there.">Hello</button>
+          <button type="button" class="m-chat-option" data-chat="Follow me.">Follow me</button>
+          <button type="button" class="m-chat-option" data-chat="Can you help me?">Help</button>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

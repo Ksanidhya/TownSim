@@ -15,7 +15,23 @@ const CROP_GROW_MINUTES = {
 const HOME_FIELD_CENTER = { x: 675, y: 280 };
 const HOME_FIELD_SIZE = { w: 340, h: 280 };
 const FARM_TOOL_DISTANCE = 170;
+const VIEW_MODE_STORAGE_KEY = "townsim_view_mode";
+const MOBILE_BREAKPOINT = 900;
 let ACTIVE_PROFILE = { playerId: "", name: "Traveler", gender: "unspecified" };
+
+function savedViewModePreference() {
+  const stored = String(localStorage.getItem(VIEW_MODE_STORAGE_KEY) || "auto").trim().toLowerCase();
+  if (stored === "desktop" || stored === "mobile" || stored === "auto") return stored;
+  return "auto";
+}
+
+function detectMobileEnvironment() {
+  const ua = String(navigator.userAgent || "").toLowerCase();
+  const uaMobile = /android|iphone|ipad|ipod|mobile|silk|kindle/.test(ua);
+  const coarse = Boolean(window.matchMedia?.("(pointer: coarse)")?.matches);
+  const smallViewport = window.innerWidth <= MOBILE_BREAKPOINT;
+  return uaMobile || (coarse && smallViewport);
+}
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
@@ -236,6 +252,10 @@ class TownScene extends Phaser.Scene {
     this.farmToolButtons = [];
     this.isNearFarm = false;
     this.farmPanelVisible = false;
+    this.viewModePreference = savedViewModePreference();
+    this.viewMode = "desktop";
+    this.touchMove = { up: false, down: false, left: false, right: false };
+    this.mobileChatMenuOpen = false;
   }
 
   init(data) {
@@ -275,6 +295,8 @@ class TownScene extends Phaser.Scene {
     this.cameras.main.roundPixels = true;
 
     this.setupSocket();
+    this.setupViewModeControls();
+    this.setupTouchControls();
     this.setupChatControls();
     this.setupFarmControls();
     this.createFarmToolbelt();
@@ -763,6 +785,147 @@ class TownScene extends Phaser.Scene {
     });
   }
 
+  effectiveViewMode(pref = this.viewModePreference) {
+    const normalized = String(pref || "auto").toLowerCase();
+    if (normalized === "desktop" || normalized === "mobile") return normalized;
+    return detectMobileEnvironment() ? "mobile" : "desktop";
+  }
+
+  applyViewMode(pref = this.viewModePreference, persist = true) {
+    const normalized = ["auto", "desktop", "mobile"].includes(String(pref)) ? String(pref) : "auto";
+    this.viewModePreference = normalized;
+    if (persist) {
+      localStorage.setItem(VIEW_MODE_STORAGE_KEY, normalized);
+    }
+    const effective = this.effectiveViewMode(normalized);
+    this.viewMode = effective;
+    document.body.dataset.viewMode = effective;
+
+    const modeSelect = document.getElementById("view-mode-select");
+    if (modeSelect && modeSelect.value !== normalized) {
+      modeSelect.value = normalized;
+    }
+    const modeActive = document.getElementById("view-mode-active");
+    if (modeActive) {
+      modeActive.textContent = `Mode: ${normalized} (${effective})`;
+    }
+
+    if (this.cameras?.main) {
+      this.cameras.main.setZoom(effective === "mobile" ? 1.45 : 2);
+    }
+    this.positionFarmToolbelt();
+    this.updateFarmToolbeltState();
+  }
+
+  setupViewModeControls() {
+    const modeSelect = document.getElementById("view-mode-select");
+    if (modeSelect) {
+      modeSelect.value = this.viewModePreference;
+      modeSelect.addEventListener("change", () => {
+        this.applyViewMode(modeSelect.value, true);
+      });
+    }
+
+    const applyAutoOnResize = () => {
+      if (this.viewModePreference === "auto") {
+        this.applyViewMode("auto", false);
+      } else {
+        this.positionFarmToolbelt();
+      }
+    };
+    this.scale.on("resize", applyAutoOnResize);
+    window.addEventListener("resize", applyAutoOnResize);
+    this.applyViewMode(this.viewModePreference, false);
+  }
+
+  setupTouchControls() {
+    const map = [
+      ["m-up", "up"],
+      ["m-down", "down"],
+      ["m-left", "left"],
+      ["m-right", "right"]
+    ];
+    const bindHold = (el, key) => {
+      if (!el) return;
+      const activate = (evt) => {
+        evt.preventDefault();
+        this.touchMove[key] = true;
+        el.classList.add("active");
+      };
+      const clear = (evt) => {
+        evt.preventDefault();
+        this.touchMove[key] = false;
+        el.classList.remove("active");
+      };
+      el.addEventListener("pointerdown", activate);
+      el.addEventListener("pointerup", clear);
+      el.addEventListener("pointercancel", clear);
+      el.addEventListener("pointerleave", clear);
+      el.addEventListener("lostpointercapture", clear);
+      el.addEventListener("contextmenu", (evt) => evt.preventDefault());
+    };
+    for (const [id, key] of map) {
+      bindHold(document.getElementById(id), key);
+    }
+    const useBtn = document.getElementById("m-use");
+    if (useBtn) {
+      useBtn.addEventListener("click", () => this.triggerUseAction());
+    }
+    const quickChatBtn = document.getElementById("m-chat");
+    if (quickChatBtn) {
+      quickChatBtn.addEventListener("click", () => this.toggleMobileChatMenu());
+    }
+    const chatOptions = document.querySelectorAll("#mobile-chat-menu .m-chat-option");
+    for (const btn of chatOptions) {
+      btn.addEventListener("click", () => {
+        const text = String(btn.getAttribute("data-chat") || "").trim();
+        if (text) this.sendQuickChat(text);
+      });
+    }
+  }
+
+  nearestNpcId(maxDistance = 95) {
+    let bestId = "";
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (const [npcId, sprite] of this.npcSprites.entries()) {
+      const dist = Math.hypot((sprite?.body?.x || 0) - this.player.x, (sprite?.body?.y || 0) - this.player.y);
+      if (dist <= maxDistance && dist < bestDist) {
+        bestDist = dist;
+        bestId = npcId;
+      }
+    }
+    return bestId;
+  }
+
+  triggerUseAction() {
+    if (!this.socket?.connected) return;
+    if (this.isReadingNews) {
+      this.hideMorningNews();
+      return;
+    }
+    const targetNpcId = this.activeDialogueNpcId || this.nearestNpcId(100);
+    if (!targetNpcId) return;
+    this.socket.emit("player_interact_npc", { npcId: targetNpcId });
+  }
+
+  setMobileChatMenuOpen(open) {
+    this.mobileChatMenuOpen = Boolean(open);
+    const menu = document.getElementById("mobile-chat-menu");
+    if (!menu) return;
+    menu.classList.toggle("hidden", !this.mobileChatMenuOpen);
+  }
+
+  toggleMobileChatMenu() {
+    this.setMobileChatMenuOpen(!this.mobileChatMenuOpen);
+  }
+
+  sendQuickChat(text) {
+    const msg = String(text || "").trim().slice(0, 240);
+    if (!msg || !this.socket?.connected || this.isSleeping || this.isDialogueHardLocked) return;
+    this.socket.emit("player_chat", { text: msg });
+    this.setMobileChatMenuOpen(false);
+  }
+
   setupChatControls() {
     const chatInput = document.getElementById("chat-input");
     const chatSend = document.getElementById("chat-send");
@@ -774,6 +937,7 @@ class TownScene extends Phaser.Scene {
       this.socket.emit("player_chat", { text });
       chatInput.value = "";
       chatInput.blur();
+      this.setMobileChatMenuOpen(false);
     };
 
     chatSend.addEventListener("click", sendChat);
@@ -1377,10 +1541,10 @@ class TownScene extends Phaser.Scene {
     const speed = 120;
     let vx = 0;
     let vy = 0;
-    if (this.cursors.left.isDown) vx -= speed;
-    if (this.cursors.right.isDown) vx += speed;
-    if (this.cursors.up.isDown) vy -= speed;
-    if (this.cursors.down.isDown) vy += speed;
+    if (this.cursors.left.isDown || this.touchMove.left) vx -= speed;
+    if (this.cursors.right.isDown || this.touchMove.right) vx += speed;
+    if (this.cursors.up.isDown || this.touchMove.up) vy -= speed;
+    if (this.cursors.down.isDown || this.touchMove.down) vy += speed;
 
     this.player.body.setVelocity(vx, vy);
     if (vx && vy) this.player.body.velocity.normalize().scale(speed);
@@ -1409,6 +1573,11 @@ async function startGame() {
     parent: "game-root",
     width: window.innerWidth,
     height: window.innerHeight,
+    scale: {
+      mode: Phaser.Scale.RESIZE,
+      width: window.innerWidth,
+      height: window.innerHeight
+    },
     antialias: false,
     autoRound: true,
     pixelArt: true,
