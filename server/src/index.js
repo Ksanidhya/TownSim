@@ -1,10 +1,11 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
 import http from "node:http";
 import crypto from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Server } from "socket.io";
 import {
   createPlayerAccount,
@@ -63,6 +64,9 @@ import {
   tickFarmGrowth,
   tickNpcMovement
 } from "./world.js";
+
+const ENV_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.env");
+dotenv.config({ path: ENV_PATH });
 
 const PORT = Number(process.env.PORT || 3002);
 const DEFAULT_CLIENT_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"];

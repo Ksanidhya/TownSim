@@ -164,14 +164,28 @@ function collectProfile() {
   const genderLabel = document.getElementById("player-gender-label");
   const genderInput = document.getElementById("player-gender");
   const submitButton = document.getElementById("start-submit");
+  const submitText = document.getElementById("start-btn-text");
+  const submitSpinner = document.getElementById("start-btn-spinner");
   const errorEl = document.getElementById("start-error");
 
   return new Promise((resolve) => {
+    const setSubmitState = (label, loading = false) => {
+      if (submitText) {
+        submitText.textContent = label;
+      } else {
+        submitButton.textContent = label;
+      }
+      if (submitSpinner) {
+        submitSpinner.classList.toggle("hidden", !loading);
+      }
+      submitButton.setAttribute("aria-busy", loading ? "true" : "false");
+    };
+
     const syncModeUi = () => {
       const isLoad = modeInput.value === "login";
       genderInput.style.display = isLoad ? "none" : "";
       genderLabel.style.display = isLoad ? "none" : "";
-      submitButton.textContent = isLoad ? "Load Game" : "Create & Start";
+      setSubmitState(isLoad ? "Load Game" : "Create & Start", false);
       errorEl.textContent = "";
     };
     modeInput.addEventListener("change", syncModeUi);
@@ -196,6 +210,7 @@ function collectProfile() {
 
         try {
           submitButton.disabled = true;
+          setSubmitState(modeInput.value === "login" ? "Loading..." : "Creating...", true);
           const profile = await submitAuth(
             {
               username,
@@ -214,6 +229,7 @@ function collectProfile() {
           errorEl.textContent = err.message || "Failed to authenticate.";
         } finally {
           submitButton.disabled = false;
+          setSubmitState(modeInput.value === "login" ? "Load Game" : "Create & Start", false);
         }
       },
       { once: false }
@@ -256,6 +272,7 @@ class TownScene extends Phaser.Scene {
     this.viewMode = "desktop";
     this.touchMove = { up: false, down: false, left: false, right: false };
     this.mobileChatMenuOpen = false;
+    this.missionDrawerOpen = false;
   }
 
   init(data) {
@@ -296,10 +313,10 @@ class TownScene extends Phaser.Scene {
 
     this.setupSocket();
     this.setupViewModeControls();
+    this.setupMissionDrawer();
     this.setupTouchControls();
     this.setupChatControls();
     this.setupFarmControls();
-    this.createFarmToolbelt();
     this.setupDialogueKeyboardControls();
     this.updateChatTarget();
     this.setFarmPanelVisible(false);
@@ -838,6 +855,26 @@ class TownScene extends Phaser.Scene {
     this.applyViewMode(this.viewModePreference, false);
   }
 
+  setMissionDrawerOpen(open) {
+    this.missionDrawerOpen = Boolean(open);
+    const drawer = document.getElementById("mission-drawer");
+    const toggle = document.getElementById("mission-toggle");
+    if (drawer) {
+      drawer.classList.toggle("hidden", !this.missionDrawerOpen);
+    }
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", this.missionDrawerOpen ? "true" : "false");
+      toggle.classList.toggle("active", this.missionDrawerOpen);
+    }
+  }
+
+  setupMissionDrawer() {
+    const toggle = document.getElementById("mission-toggle");
+    if (!toggle) return;
+    toggle.addEventListener("click", () => this.setMissionDrawerOpen(!this.missionDrawerOpen));
+    this.setMissionDrawerOpen(false);
+  }
+
   setupTouchControls() {
     const map = [
       ["m-up", "up"],
@@ -897,6 +934,29 @@ class TownScene extends Phaser.Scene {
     return bestId;
   }
 
+  setChatUiVisible(visible) {
+    const chatStack = document.getElementById("chat-stack");
+    if (chatStack) {
+      chatStack.classList.toggle("hidden", !visible);
+    }
+    const quickChatBtn = document.getElementById("m-chat");
+    if (quickChatBtn) {
+      quickChatBtn.style.display = visible ? "" : "none";
+    }
+    if (!visible) {
+      this.setMobileChatMenuOpen(false);
+    }
+  }
+
+  selectPersonForChat(npcId, npcName = "") {
+    const id = String(npcId || "").trim();
+    if (!id) return;
+    this.activeDialogueNpcId = id;
+    const fallbackName = this.npcSprites.get(id)?.name || "";
+    this.activeDialogueNpcName = String(npcName || fallbackName || "").trim();
+    this.updateChatTarget();
+  }
+
   triggerUseAction() {
     if (!this.socket?.connected) return;
     if (this.isReadingNews) {
@@ -905,6 +965,7 @@ class TownScene extends Phaser.Scene {
     }
     const targetNpcId = this.activeDialogueNpcId || this.nearestNpcId(100);
     if (!targetNpcId) return;
+    this.selectPersonForChat(targetNpcId);
     this.socket.emit("player_interact_npc", { npcId: targetNpcId });
   }
 
@@ -930,6 +991,12 @@ class TownScene extends Phaser.Scene {
     const chatInput = document.getElementById("chat-input");
     const chatSend = document.getElementById("chat-send");
     const sleepToggle = document.getElementById("sleep-toggle");
+    const applySleepUi = () => {
+      sleepToggle.classList.toggle("sleep-on", this.isSleeping);
+      sleepToggle.classList.toggle("sleep-off", !this.isSleeping);
+      sleepToggle.innerHTML = `<span class="sleep-icon">&#128564;</span> Sleep: ${this.isSleeping ? "On" : "Off"}`;
+    };
+    applySleepUi();
 
     const sendChat = () => {
       const text = chatInput.value.trim();
@@ -954,7 +1021,7 @@ class TownScene extends Phaser.Scene {
 
     sleepToggle.addEventListener("click", () => {
       this.isSleeping = !this.isSleeping;
-      sleepToggle.textContent = this.isSleeping ? "Sleep: On" : "Sleep: Off";
+      applySleepUi();
       if (this.socket?.connected) {
         this.socket.emit("player_state", { sleeping: this.isSleeping });
       }
@@ -1067,7 +1134,7 @@ class TownScene extends Phaser.Scene {
   updateFarmToolbeltState() {
     this.isNearFarm = this.isPlayerNearFarm();
     if (this.farmToolbelt) {
-      this.farmToolbelt.setVisible(this.farmPanelVisible && this.isNearFarm);
+      this.farmToolbelt.setVisible(false);
     }
     const hintEl = document.getElementById("farm-hint");
     if (hintEl) {
@@ -1075,8 +1142,26 @@ class TownScene extends Phaser.Scene {
         ? "Select a plot, then use tools or keys 1/2/3. Change crop with Q/E."
         : "Move near your home field to access farming tools.";
     }
+
+    const controlsEl = document.getElementById("farm-controls");
     const selected = this.selectedPlot();
+    const controlsVisible = this.farmPanelVisible && this.isNearFarm;
+    if (controlsEl) {
+      controlsEl.classList.toggle("hidden", !controlsVisible);
+    }
+
     const enabled = this.isNearFarm && Boolean(selected) && !this.isDialogueHardLocked && !this.isSleeping;
+    const cropSelect = document.getElementById("farm-crop");
+    const sowBtn = document.getElementById("farm-sow");
+    const waterBtn = document.getElementById("farm-water");
+    const harvestBtn = document.getElementById("farm-harvest");
+    const unselectBtn = document.getElementById("farm-unselect");
+    if (cropSelect) cropSelect.disabled = !enabled;
+    if (sowBtn) sowBtn.disabled = !enabled;
+    if (waterBtn) waterBtn.disabled = !enabled;
+    if (harvestBtn) harvestBtn.disabled = !enabled;
+    if (unselectBtn) unselectBtn.disabled = !selected;
+
     for (const btn of this.farmToolButtons) {
       btn.hit.setAlpha(enabled ? 1 : 0.4);
       btn.icon.setAlpha(enabled ? 1 : 0.45);
@@ -1150,6 +1235,10 @@ class TownScene extends Phaser.Scene {
       world.dayNumber
     )}`;
     document.getElementById("weather").textContent = world.weather;
+    document.body.dataset.weather = String(world.weather || "clear")
+      .toLowerCase()
+      .replace(/[^a-z]+/g, "-")
+      .replace(/^-|-$/g, "") || "clear";
     const econ = world.economy;
     if (econ?.cropPrices) {
       const t = econ.cropPrices.turnip ?? "-";
@@ -1232,6 +1321,7 @@ class TownScene extends Phaser.Scene {
           ) {
             return;
           }
+          this.selectPersonForChat(npc.id, npc.name);
           this.socket.emit("player_interact_npc", { npcId: npc.id });
         });
         const label = this.add.text(npc.x - 16, npc.y - 24, npc.name, {
@@ -1523,11 +1613,15 @@ class TownScene extends Phaser.Scene {
   updateChatTarget() {
     const targetEl = document.getElementById("chat-target");
     const inputEl = document.getElementById("chat-input");
-    if (this.isInDialogue && this.activeDialogueNpcName) {
-      targetEl.textContent = `Talking to: ${this.activeDialogueNpcName}`;
-      inputEl.placeholder = `Reply to ${this.activeDialogueNpcName}...`;
+    const hasTarget = Boolean(this.activeDialogueNpcId);
+    this.setChatUiVisible(hasTarget);
+    if (hasTarget) {
+      const targetName = this.activeDialogueNpcName || this.npcSprites.get(this.activeDialogueNpcId)?.name || "someone";
+      targetEl.textContent = `Talking to: ${targetName}`;
+      inputEl.placeholder = `Reply to ${targetName}...`;
       return;
     }
+    this.setMobileChatMenuOpen(false);
     targetEl.textContent = "Talking to: nobody";
     inputEl.placeholder = "Say something...";
   }

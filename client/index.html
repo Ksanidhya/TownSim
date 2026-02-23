@@ -1,103 +1,202 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Town Sim</title>
+    <title>TownSim &mdash; Welcome Home</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=Press+Start+2P&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
     <div id="start-screen">
-      <form id="start-form">
-        <h1>Welcome Home</h1>
-        <p>Create a new game or load your profile.</p>
+      <div class="start-bg-stars" aria-hidden="true"></div>
+      <div class="start-bg-shimmer" aria-hidden="true"></div>
+      <form id="start-form" autocomplete="off">
+        <div class="start-banner" aria-hidden="true">
+          <span class="banner-leaf">&#127807;</span>
+          <span class="banner-leaf">&#127806;</span>
+          <span class="banner-leaf">&#127807;</span>
+        </div>
+        <h1>TownSim</h1>
+        <p class="start-subtitle">A living town awaits you.</p>
+
         <label for="auth-mode">Mode</label>
         <select id="auth-mode" required>
-          <option value="register">Create New Game</option>
-          <option value="login">Load Game</option>
+          <option value="register">&#10024; Create New Game</option>
+          <option value="login">&#128194; Load Game</option>
         </select>
+
         <label for="player-name">Username</label>
-        <input id="player-name" type="text" maxlength="24" required placeholder="username" />
+        <input
+          id="player-name"
+          type="text"
+          maxlength="24"
+          required
+          placeholder="your username"
+          spellcheck="false"
+        />
+
         <label for="player-password">Password</label>
-        <input id="player-password" type="password" minlength="4" maxlength="72" required placeholder="password" />
+        <input
+          id="player-password"
+          type="password"
+          minlength="4"
+          maxlength="72"
+          required
+          placeholder="min 4 characters"
+        />
+
         <label for="player-gender" id="player-gender-label">Gender</label>
         <select id="player-gender">
-          <option value="female">Female</option>
-          <option value="male">Male</option>
-          <option value="non-binary">Non-binary</option>
+          <option value="female">&#128105; Female</option>
+          <option value="male">&#128104; Male</option>
+          <option value="non-binary">&#129489; Non-binary</option>
         </select>
+
         <div id="start-error" aria-live="polite"></div>
-        <button id="start-submit" type="submit">Create & Start</button>
+
+        <button id="start-submit" type="submit">
+          <span id="start-btn-text">Create &amp; Start</span>
+          <span id="start-btn-spinner" class="btn-spinner hidden" aria-hidden="true"></span>
+        </button>
+
+        <p class="start-footer">Arrow keys to move · Space/Enter to interact</p>
       </form>
     </div>
+
     <div id="game-root"></div>
-    <div id="sleep-skip" class="hidden" aria-live="polite">Night passes... you wake at 6:00 AM.</div>
+
+    <div id="sleep-skip" class="hidden" aria-live="polite">
+      <span class="sleep-moon">&#127769;</span>
+      <span class="sleep-text">Night passes...</span>
+      <span class="sleep-subtext">You wake at dawn.</span>
+    </div>
+
     <aside id="hud">
-      <div class="chip" id="player-profile">Player: Traveler (unspecified)</div>
-      <div class="chip" id="clock">8:00 AM</div>
-      <div class="chip" id="weather">clear</div>
-      <div class="chip" id="economy">Market: ...</div>
-      <div class="chip rumor" id="world-events">Events: none</div>
-      <div class="chip rumor" id="factions">Factions: ...</div>
-      <div class="chip rumor" id="mission">Mission: ...</div>
-      <div class="chip rumor" id="town-mission">Town Gossip Mission: ...</div>
-      <div class="chip rumor" id="story-arc">Story Arc: ...</div>
-      <div id="view-controls">
-        <label for="view-mode-select">View</label>
-        <select id="view-mode-select">
-          <option value="auto">Auto</option>
-          <option value="desktop">Desktop</option>
-          <option value="mobile">Mobile</option>
-        </select>
-        <span class="chip" id="view-mode-active">Mode: auto</span>
-      </div>
-      <div id="chat-controls">
-        <input id="chat-input" type="text" maxlength="240" placeholder="Say something..." />
-        <button id="chat-send" type="button">Send</button>
-        <button id="sleep-toggle" type="button">Sleep: Off</button>
-      </div>
-      <div class="chip" id="chat-target">Talking to: nobody</div>
-      <div id="news-popup" class="hidden" role="dialog" aria-live="polite" tabindex="0">
-        <div id="news-title"></div>
-        <div id="news-text"></div>
-        <div id="news-hint">Click or press Enter/Space to close</div>
-      </div>
-      <div id="farm-panel" class="hidden">
-        <div id="farm-title">Home Farm</div>
-        <div class="farm-chip" id="farm-selected">Plot: none</div>
-        <div class="farm-chip" id="farm-coins">Coins: 0</div>
-        <div class="farm-chip" id="farm-inventory">Inventory: -</div>
-        <div id="farm-controls">
-          <select id="farm-crop">
-            <option value="turnip">Turnip</option>
-            <option value="carrot">Carrot</option>
-            <option value="pumpkin">Pumpkin</option>
-          </select>
-          <button id="farm-sow" type="button" class="farm-tool-btn">Tool: Sow</button>
-          <button id="farm-water" type="button" class="farm-tool-btn">Tool: Water</button>
-          <button id="farm-harvest" type="button" class="farm-tool-btn">Tool: Harvest</button>
-          <button id="farm-unselect" type="button" class="farm-tool-btn">Unselect Plot</button>
+      <section id="hud-left" class="hud-side">
+        <div class="chip chip--events rumor chip--main-event" id="world-events">
+          <span class="chip-icon">&#127914;</span><span class="chip-body">Events: none</span>
         </div>
-        <div id="farm-hint">Move near your home field to reveal tools. Click a plot first.</div>
-        <div id="farm-feedback">No farm updates yet.</div>
-      </div>
+        <div class="chip chip--clock" id="clock">
+          <span class="chip-icon">&#128336;</span><span class="chip-body">8:00 AM</span>
+        </div>
+        <div id="chat-stack" class="hidden">
+          <div class="chip chip--target" id="chat-target">
+            <span class="chip-icon">&#128173;</span><span class="chip-body">Talking to: nobody</span>
+          </div>
+          <div id="chat-controls">
+            <input id="chat-input" type="text" maxlength="240" placeholder="Say something..." autocomplete="off" spellcheck="false" />
+            <button id="chat-send" type="button">Send</button>
+            <button id="sleep-toggle" type="button" class="sleep-off">
+              <span class="sleep-icon">&#128564;</span> Sleep: Off
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section id="hud-right" class="hud-side">
+        <div id="hud-right-top">
+          <div class="chip chip--player" id="player-profile">
+            <span class="chip-icon">&#129489;</span><span class="chip-body">Traveler</span>
+          </div>
+          <button id="mission-toggle" type="button" aria-expanded="false" aria-controls="mission-drawer" title="Missions">&#128220;</button>
+        </div>
+
+        <div class="chip chip--weather" id="weather">
+          <span class="chip-icon">&#9925;</span><span class="chip-body">clear</span>
+        </div>
+        <div class="chip chip--economy rumor" id="economy">
+          <span class="chip-icon">&#128176;</span><span class="chip-body">Market: ...</span>
+        </div>
+        <div class="chip chip--factions rumor" id="factions">
+          <span class="chip-icon">&#9876;&#65039;</span><span class="chip-body">Factions: ...</span>
+        </div>
+
+        <div id="view-controls">
+          <label for="view-mode-select">View</label>
+          <select id="view-mode-select">
+            <option value="auto">Auto</option>
+            <option value="desktop">Desktop</option>
+            <option value="mobile">Mobile</option>
+          </select>
+          <span class="chip chip--mode" id="view-mode-active">Mode: auto</span>
+        </div>
+
+        <div id="mission-drawer" class="hidden">
+          <div class="chip chip--mission rumor" id="mission">
+            <span class="chip-icon">&#128220;</span><span class="chip-body">Mission: ...</span>
+          </div>
+          <div class="chip chip--town-mission rumor" id="town-mission">
+            <span class="chip-icon">&#128172;</span><span class="chip-body">Gossip Mission: ...</span>
+          </div>
+          <div class="chip chip--story rumor" id="story-arc">
+            <span class="chip-icon">&#128214;</span><span class="chip-body">Story Arc: ...</span>
+          </div>
+        </div>
+
+        <div id="news-popup" class="hidden" role="dialog" aria-live="polite" tabindex="0">
+          <div class="news-header">
+            <span class="news-seal">&#128240;</span>
+            <div id="news-title" class="news-title-text">Morning Ledger</div>
+          </div>
+          <div id="news-text" class="news-body-text"></div>
+          <div id="news-hint">Click · Enter · Space to close</div>
+        </div>
+
+        <div id="farm-panel" class="hidden">
+          <div class="farm-header">
+            <span class="farm-header-icon">&#127806;</span>
+            <span id="farm-title">Home Farm</span>
+          </div>
+          <div class="farm-stats">
+            <div class="farm-chip farm-chip--selected" id="farm-selected">
+              <span>&#129717;</span> Plot: none
+            </div>
+            <div class="farm-chip farm-chip--coins" id="farm-coins">
+              <span>&#129689;</span> Coins: 0
+            </div>
+          </div>
+          <div class="farm-chip farm-chip--inventory" id="farm-inventory">Inventory: -</div>
+          <div id="farm-hint" class="farm-hint-text">Move near your home field to reveal tools.</div>
+          <div id="farm-feedback" class="farm-feedback-text">No farm updates yet.</div>
+        </div>
+      </section>
     </aside>
+
+    <div id="farm-controls" class="hidden">
+      <select id="farm-crop">
+        <option value="turnip">&#127793; Turnip</option>
+        <option value="carrot">&#129365; Carrot</option>
+        <option value="pumpkin">&#127875; Pumpkin</option>
+      </select>
+      <button id="farm-sow" type="button" class="farm-tool-btn farm-tool-btn--sow" title="Sow" aria-label="Sow">&#129716;</button>
+      <button id="farm-water" type="button" class="farm-tool-btn farm-tool-btn--water" title="Water" aria-label="Water">&#128167;</button>
+      <button id="farm-harvest" type="button" class="farm-tool-btn farm-tool-btn--harvest" title="Harvest" aria-label="Harvest">&#129530;</button>
+      <button id="farm-unselect" type="button" class="farm-tool-btn farm-tool-btn--unselect" title="Unselect plot" aria-label="Unselect plot">&#10006;</button>
+    </div>
+
     <div id="mobile-controls" aria-label="mobile controls">
       <div id="mobile-dpad">
-        <button type="button" class="m-btn" id="m-up">▲</button>
-        <button type="button" class="m-btn" id="m-left">◀</button>
-        <button type="button" class="m-btn" id="m-down">▼</button>
-        <button type="button" class="m-btn" id="m-right">▶</button>
+        <button type="button" class="m-btn m-btn--dpad" id="m-up">&#9650;</button>
+        <button type="button" class="m-btn m-btn--dpad" id="m-left">&#9664;</button>
+        <button type="button" class="m-btn m-btn--dpad" id="m-down">&#9660;</button>
+        <button type="button" class="m-btn m-btn--dpad" id="m-right">&#9654;</button>
       </div>
       <div id="mobile-actions">
-        <button type="button" class="m-btn action" id="m-use">Use / Talk</button>
-        <button type="button" class="m-btn action" id="m-chat">Quick Chat</button>
+        <button type="button" class="m-btn m-btn--action m-btn--use" id="m-use">&#9889; Use / Talk</button>
+        <button type="button" class="m-btn m-btn--action m-btn--chat" id="m-chat">&#128172; Quick Chat</button>
         <div id="mobile-chat-menu" class="hidden">
-          <button type="button" class="m-chat-option" data-chat="Hello there.">Hello</button>
-          <button type="button" class="m-chat-option" data-chat="Follow me.">Follow me</button>
-          <button type="button" class="m-chat-option" data-chat="Can you help me?">Help</button>
+          <button type="button" class="m-chat-option" data-chat="Hello there.">&#128075; Hello</button>
+          <button type="button" class="m-chat-option" data-chat="Follow me.">&#128694; Follow me</button>
+          <button type="button" class="m-chat-option" data-chat="Can you help me?">&#128591; Help</button>
         </div>
       </div>
     </div>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
